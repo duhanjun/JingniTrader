@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import sys
 from typing import List
 
 from .registry import REGISTRY, ReportPlugin, register, unregister
@@ -40,6 +41,10 @@ def _load_render_func(plugin_dir: str):
     if not os.path.exists(render_path):
         return None
     try:
+        # 将插件根目录加入 sys.path，使 render.py 内可导入 _engine_access 等辅助模块
+        plugins_root = os.path.dirname(plugin_dir)
+        if plugins_root not in sys.path:
+            sys.path.insert(0, plugins_root)
         module_name = f"report_plugin_{os.path.basename(plugin_dir)}_render"
         spec = importlib.util.spec_from_file_location(module_name, render_path)
         mod = importlib.util.module_from_spec(spec)

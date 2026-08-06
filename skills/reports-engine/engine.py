@@ -1890,7 +1890,7 @@ def run(ctx) -> Dict[str, Any]:
             "error": str
         }
     """
-    # 优先级 1: 绩效复盘意图 → 绩效归因报告
+    # 优先级 1: 绩效复盘意图 → 绩效归因报告（内置独立路由，保持行为一致）
     meta = getattr(ctx, 'metadata', {}) or {}
     if meta.get("report_intent") == "attribution":
         logger.info("检测到绩效复盘意图，生成绩效归因报告")
@@ -1906,7 +1906,9 @@ def run(ctx) -> Dict[str, Any]:
         logger.info("检测到执行监控意图，生成执行监控报告")
         return _run_execution_report(ctx)
 
-    # 优先级 4: 报告插件匹配（通过 plugin.yaml 的 trigger）
+    # 优先级 4: 报告插件匹配（通过 plugin.yaml 的 trigger）。
+    # 归因/组合/执行已有内置独立路由（优先级 1-3），插件机制补充承载其余报告
+    # （技术/基本面/资本流等）。命中插件则优先走插件，未命中回退内置路由。
     if ENABLE_PLUGIN:
         try:
             _ensure_plugins_loaded()

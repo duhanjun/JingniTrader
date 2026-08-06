@@ -1,0 +1,23 @@
+# 绩效归因报告 — 内置报告插件化迁移
+id: attribution_report
+label: 绩效归因
+icon: "📊"
+version: "1.0.0"
+enabled: true
+
+# 触发条件：明确请求绩效归因时（report_intent=attribution）
+trigger:
+  - { field: report_intent, equals: attribution }
+
+# 所需产物：执行监控产物（归因基于 EXECUTION）
+requires:
+  - EXECUTION
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 30

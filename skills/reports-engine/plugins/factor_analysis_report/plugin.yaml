@@ -1,0 +1,24 @@
+# 因子分析报告 — 内置报告插件化注册
+# 因子分析报告由 _maybe_render_factor_analysis_report 生成，作为个股分析流程的
+# 附加产物（非独立路由）。本插件仅注册到插件框架（统一管理），默认不拦截内置路由。
+id: factor_analysis_report
+label: 因子分析
+icon: "🧬"
+version: "1.0.0"
+enabled: true
+
+# 触发条件留空：仅注册不触发（由个股分析流程附带生成）
+trigger: []
+
+# 所需产物：因子数据
+requires:
+  - FACTOR
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 70

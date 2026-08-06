@@ -1,0 +1,23 @@
+# 执行监控报告 — 内置报告插件化迁移
+id: execution_report
+label: 执行监控
+icon: "🎯"
+version: "1.0.0"
+enabled: true
+
+# 触发条件：明确请求执行监控报告时（report_intent=execution）
+trigger:
+  - { field: report_intent, equals: execution }
+
+# 所需产物：执行监控产物（EXECUTION）
+requires:
+  - EXECUTION
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 50

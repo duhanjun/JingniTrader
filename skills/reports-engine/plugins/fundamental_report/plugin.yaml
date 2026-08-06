@@ -1,0 +1,23 @@
+# 基本面分析报告 — 内置报告插件化迁移
+id: fundamental_report
+label: 基本面分析
+icon: "🏢"
+version: "1.0.0"
+enabled: true
+
+# 触发条件：明确请求基本面分析报告时（report_intent=fundamental）
+trigger:
+  - { field: report_intent, equals: fundamental }
+
+# 所需产物：DATA 行情数据
+requires:
+  - DATA
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 11

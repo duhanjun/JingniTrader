@@ -1,0 +1,23 @@
+# 组合优化报告 — 内置报告插件化迁移
+id: portfolio_report
+label: 组合优化
+icon: "⚖️"
+version: "1.0.0"
+enabled: true
+
+# 触发条件：明确请求组合优化报告时（report_intent=portfolio）
+trigger:
+  - { field: report_intent, equals: portfolio }
+
+# 所需产物：组合优化产物（PORTFOLIO）
+requires:
+  - PORTFOLIO
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 40

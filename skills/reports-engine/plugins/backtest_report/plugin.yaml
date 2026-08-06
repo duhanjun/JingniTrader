@@ -1,0 +1,24 @@
+# 策略回测报告 — 内置报告插件化注册
+# 回测报告生成逻辑内联在 reports-engine/engine.py run() 中，保持内置路由（优先级5）。
+# 本插件仅注册到插件框架（统一管理/可发现），不拦截内置路由。
+id: backtest_report
+label: 策略回测
+icon: "📉"
+version: "1.0.0"
+enabled: true
+
+# 触发条件留空：仅注册不触发（内置路由处理回测报告）
+trigger: []
+
+# 所需产物：回测产物
+requires:
+  - BACKTEST
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 60
