@@ -154,7 +154,7 @@ class TestAttributionReportIntegration:
         with open(result["artifact_path"], "r", encoding="utf-8") as f:
             html = f.read()
         assert "绩效归因报告" in html
-        assert "交易统计概览" in html
+        assert "交易统计" in html
         assert "Round-Trip" in html
         assert "执行质量分析" in html
         assert "深度解读" in html

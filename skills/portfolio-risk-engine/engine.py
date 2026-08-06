@@ -51,32 +51,49 @@ class PortfolioOptimizer:
         returns: pd.DataFrame,
         method: str = EXPECTED_RETURNS_METHOD
     ) -> pd.Series:
-        """估计预期收益"""
+        """估计预期收益
+
+        注意：调用方传入的是已经计算好的收益率 DataFrame（非原始价格），
+        因此必须显式传 returns_data=True，否则 pypfopt 1.5+ 会默认按价格
+        处理收益率数据，导致 ema_historical_return 返回 inf，进而使优化
+        求解报 ValueError: Problem data contains NaN or Inf。
+
+        当 pypfopt 未安装（_fallback=True）时，直接用历史均值收益率作为
+        预期收益的朴素估计，避免引用未定义的 expected_returns 抛 NameError。
+        """
+        if self._fallback:
+            # 无 pypfopt：用年化历史均值作为预期收益的朴素估计
+            ann_factor = 252
+            return returns.mean() * ann_factor
         if method == "ema_historical":
-            return expected_returns.ema_historical_return(returns, frequency=252)
+            return expected_returns.ema_historical_return(returns, returns_data=True, frequency=252)
         elif method == "mean_historical":
-            return expected_returns.mean_historical_return(returns, frequency=252)
+            return expected_returns.mean_historical_return(returns, returns_data=True, frequency=252)
         elif method == "capm_return":
-            return expected_returns.capm_return(returns)
+            return expected_returns.capm_return(returns, returns_data=True)
         else:
-            return expected_returns.mean_historical_return(returns, frequency=252)
+            return expected_returns.mean_historical_return(returns, returns_data=True, frequency=252)
 
     def estimate_covariance(
         self,
         returns: pd.DataFrame,
         method: str = COVARIANCE_METHOD
     ) -> pd.DataFrame:
-        """估计协方差矩阵"""
+        """估计协方差矩阵
+
+        与 estimate_expected_returns 同理，传入的是收益率数据而非价格，
+        必须设置 returns_data=True，避免 pypfopt 1.5+ 按价格误处理。
+        """
         if self._fallback:
             return returns.cov()
         if method == "ledoit_wolf":
-            return risk_models.CovarianceShrinkage(returns).ledoit_wolf()
+            return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf()
         elif method == "sample_cov":
-            return risk_models.sample_cov(returns)
+            return risk_models.sample_cov(returns, returns_data=True)
         elif method == "shrinkage":
-            return risk_models.CovarianceShrinkage(returns).ledoit_wolf(shrinkage_target="constant_correlation")
+            return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf(shrinkage_target="constant_correlation")
         else:
-            return risk_models.CovarianceShrinkage(returns).ledoit_wolf()
+            return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf()
 
     def optimize(
         self,

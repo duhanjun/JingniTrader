@@ -23,6 +23,10 @@ from scripts.config import (
     INCLUDE_HEATMAP,
     INCLUDE_ATTRIBUTION, CHART_THEME
 )
+from scripts.templates.common_components import (
+    build_page_css, build_nav_bar_css, build_nav_bar_html, build_footer_html,
+    render_page,
+)
 
 logger = logging.getLogger("reports-engine")
 
@@ -34,6 +38,7 @@ class ReportGenerator:
         self.title = title
         self.charts: List[str] = []
         self.metrics: Dict[str, Any] = {}
+        self.factor_summary_html: str = ""  # M4: 策略因子清单章节（可空）
 
     def calc_performance_metrics(
         self,
@@ -69,6 +74,17 @@ class ReportGenerator:
             if len(returns[returns < 0]) > 0 else 0
         )
 
+        # 盈亏比（Profit Factor）= 总盈利 / 总亏损（量化 quantstats 维度）
+        gross_profit = float(returns[returns > 0].sum())
+        gross_loss = float(-returns[returns < 0].sum())
+        profit_factor = float(gross_profit / gross_loss) if gross_loss > 0 else float("inf")
+
+        # 回测区间（起止日期 + 交易日数）
+        eq_idx = eq.index
+        backtest_start = str(pd.Timestamp(eq_idx[0]).strftime("%Y-%m-%d")) if len(eq_idx) > 0 else ""
+        backtest_end = str(pd.Timestamp(eq_idx[-1]).strftime("%Y-%m-%d")) if len(eq_idx) > 0 else ""
+        calendar_days = int((pd.Timestamp(eq_idx[-1]) - pd.Timestamp(eq_idx[0])).days) if len(eq_idx) > 1 else 0
+
         return {
             "total_return": total_return,
             "annual_return": annual_return,
@@ -79,6 +95,10 @@ class ReportGenerator:
             "win_rate": win_rate,
             "daily_var_95": daily_var_95,
             "sortino_ratio": sortino_ratio,
+            "profit_factor": profit_factor,
+            "backtest_start": backtest_start,
+            "backtest_end": backtest_end,
+            "backtest_days": calendar_days,
             "n_trading_days": n_days,
         }
 
@@ -130,7 +150,7 @@ class ReportGenerator:
         )
 
         fig.update_layout(
-            title=self.title,
+            title=None,
             height=700,
             template=CHART_THEME,
             hovermode='x unified',
@@ -141,6 +161,124 @@ class ReportGenerator:
         fig.update_xaxes(title_text="日期", row=2, col=1)
 
         return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+    def make_equity_exposure_linked_chart(
+        self,
+        equity_curve: pd.DataFrame,
+        exposures_df: pd.DataFrame,
+        factor_cols: List[str],
+        factor_labels: Dict[str, str],
+        benchmark_data: Optional[pd.DataFrame] = None,
+    ) -> str:
+        """净值曲线（上）+ 回撤（中）+ 组合因子暴露时序（下）联动三面板图。
+
+        共享 x 轴（日期），可垂直对比净值/回撤走势与对应时点因子暴露，
+        判断某段上涨/回撤是由哪个风格因子驱动。下面板支持下拉切换因子。
+
+        equity_curve: 含 date + equity 列。
+        exposures_df: 含 date + 各 factor_cols 列（组合逐日暴露）。
+        factor_cols: 下面板展示的因子列（按显示顺序）。
+        factor_labels: 因子列 -> 中文名映射。
+        """
+        if equity_curve.empty or 'equity' not in equity_curve.columns:
+            return ""
+        if exposures_df is None or exposures_df.empty:
+            return ""
+        cols = [c for c in factor_cols if c in exposures_df.columns]
+        if not cols:
+            return ""
+
+        eq = equity_curve.set_index('date')['equity']
+        returns = eq.pct_change().dropna()
+        nav = (1 + returns).cumprod()
+        drawdown = nav / nav.cummax() - 1
+
+        exp = exposures_df[["date"] + cols].copy()
+        exp["date"] = pd.to_datetime(exp["date"])
+        exp = exp.sort_values("date")
+
+        fig = make_subplots(
+            rows=3, cols=1,
+            shared_xaxes=True,
+            vertical_spacing=0.05,
+            row_heights=[0.4, 0.25, 0.35],
+        )
+
+        # 上：净值 + 基准
+        fig.add_trace(
+            go.Scatter(x=nav.index, y=nav.values, mode='lines',
+                       name='策略净值', line=dict(color='#1f77b4', width=2)),
+            row=1, col=1
+        )
+        if benchmark_data is not None and not benchmark_data.empty:
+            bench_eq = benchmark_data.set_index('date')['close']
+            bench_nav = bench_eq / bench_eq.iloc[0] if len(bench_eq) > 0 else pd.Series()
+            if len(bench_nav) > 0:
+                fig.add_trace(
+                    go.Scatter(x=bench_nav.index, y=bench_nav.values, mode='lines',
+                               name=BENCHMARK, line=dict(color='gray', width=1, dash='dash')),
+                    row=1, col=1
+                )
+
+        # 中：回撤（始终显示）
+        fig.add_trace(
+            go.Scatter(x=drawdown.index, y=drawdown.values, mode='lines',
+                       fill='tozeroy', name='策略回撤',
+                       line=dict(color='#d62728', width=1),
+                       fillcolor='rgba(214,39,40,0.2)'),
+            row=2, col=1
+        )
+
+        # 下：各因子暴露曲线（默认显示第一个，其余通过下拉切换）
+        n = len(cols)
+        for i, c in enumerate(cols):
+            label = factor_labels.get(c, c)
+            visible = i == 0
+            fig.add_trace(
+                go.Scatter(x=exp["date"], y=exp[c], mode="lines+markers",
+                           name=f"{label} 因子", line=dict(width=2), visible=visible),
+                row=3, col=1
+            )
+
+        # 下拉菜单：切换下面板显示的因子（不再更新子图标题，标题已删除）
+        # trace 顺序：净值(1) + 基准(0|1) + 回撤(1) + 因子(n)
+        upper_count = 2 + (1 if benchmark_data is not None and not benchmark_data.empty else 0)
+        buttons = []
+        for i, c in enumerate(cols):
+            label = factor_labels.get(c, c)
+            # 净值/基准/回撤恒可见；下面板仅当前因子可见
+            vis = [True] * upper_count + [j == i for j in range(n)]
+            buttons.append(dict(
+                label=label,
+                method="update",
+                args=[{"visible": vis}],
+            ))
+
+        fig.update_layout(
+            title=None,
+            height=900,
+            template=CHART_THEME,
+            hovermode='x unified',
+            margin=dict(t=80, b=50, l=60, r=20),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+            updatemenus=[dict(
+                buttons=buttons,
+                direction="down",
+                showactive=True,
+                x=1.0, xanchor="right",
+                y=1.0, yanchor="top",
+                pad=dict(r=10, t=10),
+                font=dict(size=12),
+                bgcolor="#ffffff",
+                bordercolor="#d1d5db",
+                borderwidth=1,
+            )],
+        )
+        fig.update_yaxes(title_text="净值", row=1, col=1)
+        fig.update_yaxes(title_text="回撤 %", row=2, col=1, tickformat=".1%")
+        fig.update_yaxes(title_text="暴露度", row=3, col=1, zeroline=True, zerolinecolor="black")
+        fig.update_xaxes(title_text="日期", row=3, col=1)
+        return fig.to_html(full_html=False, include_plotlyjs="cdn")
 
     def make_monthly_heatmap(self, equity_curve: pd.DataFrame) -> str:
         """生成月度收益热力图"""
@@ -177,11 +315,55 @@ class ReportGenerator:
         ))
 
         fig.update_layout(
-            title="月度收益热力图",
+            title=None,
             height=400,
             template=CHART_THEME,
             xaxis=dict(title="月份", side="top"),
             yaxis=dict(title="年份", autorange="reversed"),
+        )
+
+        return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+    def make_rolling_return_chart(
+        self,
+        equity_curve: pd.DataFrame,
+        window: int = 30,
+    ) -> str:
+        """生成滚动收益曲线（rolling window 累计收益）。
+
+        对应 quantstats 的 rolling return 维度，展示任意 window 个交易日区间
+        的累计收益随时间变化，帮助观察策略盈利能力的稳定性/衰减。
+        """
+        if equity_curve.empty or 'equity' not in equity_curve.columns:
+            return ""
+
+        eq = equity_curve.set_index('date')['equity']
+        returns = eq.pct_change().dropna()
+        if len(returns) < window + 1:
+            return ""
+
+        rolling = (1 + returns).rolling(window).apply(
+            lambda x: (1 + x).prod() - 1, raw=False
+        ).dropna()
+
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(x=rolling.index, y=rolling.values, mode='lines',
+                       name=f'{window}日滚动收益',
+                       line=dict(color='#9467bd', width=2),
+                       fill='tozeroy',
+                       fillcolor='rgba(148,103,189,0.15)')
+        )
+
+        fig.update_layout(
+            title=None,
+            height=350,
+            template=CHART_THEME,
+            hovermode='x unified',
+            yaxis_title=f'{window}日滚动收益',
+            xaxis_title='日期',
+            yaxis_tickformat='.1%',
+            showlegend=False,
         )
 
         return fig.to_html(full_html=False, include_plotlyjs='cdn')
@@ -211,6 +393,110 @@ class ReportGenerator:
         )
 
         return fig.to_html(full_html=False, include_plotlyjs='cdn')
+
+    def make_factor_exposure_timeseries_chart(
+        self,
+        exposures_df: pd.DataFrame,
+        factor_col: str,
+        label: str,
+    ) -> str:
+        """生成组合在单个因子上的逐日暴露时序折线图（单股/少股模式）。
+
+        exposures_df: 需含 date 与 factor_col 列（组合逐日暴露）。
+        factor_col: 因子列名；label: 图表标题中的中文名。
+        """
+        if exposures_df is None or exposures_df.empty or factor_col not in exposures_df.columns:
+            return ""
+        df = exposures_df[["date", factor_col]].dropna().sort_values("date")
+        if df.empty:
+            return ""
+
+        fig = go.Figure(data=[
+            go.Scatter(x=df["date"], y=df[factor_col], mode="lines+markers",
+                       name=label, line=dict(color="#263859", width=2))
+        ])
+        fig.update_layout(
+            title=f"组合因子暴露时序（{label}）",
+            height=380,
+            template=CHART_THEME,
+            yaxis=dict(title="暴露度", zeroline=True, zerolinecolor="black"),
+            xaxis=dict(title="日期"),
+            showlegend=False,
+        )
+        return fig.to_html(full_html=False, include_plotlyjs="cdn")
+
+    def make_factor_exposure_multi_chart(
+        self,
+        exposures_df: pd.DataFrame,
+        factor_cols: List[str],
+        factor_labels: Dict[str, str],
+    ) -> str:
+        """生成组合因子暴露时序图（单图 + 下拉切换因子）。
+
+        相比逐个因子生成多张图，本方法用 Plotly updatemenus 下拉菜单，
+        在一个图表内切换显示不同因子的逐日暴露，避免页面过长。
+
+        exposures_df: 需含 date 及各 factor_cols 列。
+        factor_cols: 要展示的因子列（按显示顺序）。
+        factor_labels: 因子列 -> 中文名映射。
+        """
+        if exposures_df is None or exposures_df.empty:
+            return ""
+        cols = [c for c in factor_cols if c in exposures_df.columns]
+        if not cols:
+            return ""
+
+        df = exposures_df[["date"] + cols].copy()
+        df["date"] = pd.to_datetime(df["date"])
+
+        traces = []
+        for c in cols:
+            label = factor_labels.get(c, c)
+            traces.append(go.Scatter(
+                x=df["date"], y=df[c], mode="lines+markers",
+                name=label, line=dict(width=2),
+            ))
+
+        # 下拉菜单：每个按钮显示对应因子曲线，其余隐藏
+        n = len(cols)
+        buttons = []
+        for i, c in enumerate(cols):
+            label = factor_labels.get(c, c)
+            vis = [False] * n
+            vis[i] = True
+            buttons.append(dict(
+                label=label,
+                method="update",
+                args=[{"visible": vis},
+                      {"title": {"text": f"组合因子暴露时序（{label}）"}}],
+            ))
+        # 默认显示第一个因子
+        traces[0].visible = True
+        for t in traces[1:]:
+            t.visible = False
+
+        fig = go.Figure(data=traces)
+        fig.update_layout(
+            title=f"组合因子暴露时序（{factor_labels.get(cols[0], cols[0])}）",
+            height=400,
+            template=CHART_THEME,
+            margin=dict(t=80, b=50, l=60, r=20),
+            yaxis=dict(title="暴露度", zeroline=True, zerolinecolor="black"),
+            xaxis=dict(title="日期"),
+            updatemenus=[dict(
+                buttons=buttons,
+                direction="down",
+                showactive=True,
+                x=1.0, xanchor="right",
+                y=1.0, yanchor="top",
+                pad=dict(r=10, t=10),
+                font=dict(size=12),
+                bgcolor="#ffffff",
+                bordercolor="#d1d5db",
+                borderwidth=1,
+            )],
+        )
+        return fig.to_html(full_html=False, include_plotlyjs="cdn")
 
     def make_industry_attribution_chart(
         self,
@@ -244,52 +530,9 @@ class ReportGenerator:
         return fig.to_html(full_html=False, include_plotlyjs='cdn')
 
     def build_html_report(self) -> str:
-        """构建完整 HTML 报告"""
-        html_parts = [f"""<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{self.title}</title>
-    <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; color: #333; }}
-        .header {{ background: linear-gradient(135deg, #1f77b4, #2ca02c); color: white;
-                   padding: 40px; border-radius: 12px; margin-bottom: 30px; }}
-        .header h1 {{ margin: 0 0 10px 0; font-size: 28px; }}
-        .header p {{ margin: 0; opacity: 0.9; }}
-        .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-                         gap: 16px; margin-bottom: 30px; }}
-        .metric-card {{ background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-                        text-align: center; }}
-        .metric-value {{ font-size: 28px; font-weight: 700; color: #1f77b4; }}
-        .metric-label {{ font-size: 13px; color: #888; margin-top: 4px; }}
-        .metric-value.positive {{ color: #2ca02c; }}
-        .metric-value.negative {{ color: #d62728; }}
-        .section {{ background: white; border-radius: 10px; padding: 24px; margin-bottom: 20px;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-        .section h2 {{ margin: 0 0 16px 0; font-size: 18px; color: #444;
-                       border-bottom: 2px solid #eee; padding-bottom: 8px; }}
-        .chart-container {{ width: 100%; overflow-x: auto; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #eee; }}
-        th {{ background: #f9f9f9; font-weight: 600; color: #555; }}
-        tr:hover {{ background: #fafafa; }}
-        .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #aaa; }}
-    </style>
-</head>
-<body>
-<div class="header">
-    <h1>{self.title}</h1>
-    <p>生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} |
-       基准: {BENCHMARK} | 行业标准: {INDUSTRY_STANDARD.upper()}</p>
-</div>
-
-<div class="section">
-    <h2>绩效概览</h2>
-    <div class="metrics-grid">
-"""]
-
+        """构建完整 HTML 报告（统一骨架 base.html.j2 渲染，阶段一）"""
+        # 组装绩效指标卡片数据（含格式化 + 正负样式），交给模板渲染
+        metrics_display: List[Dict[str, Any]] = []
         metric_order = [
             ("annual_return", "年化收益", "positive"),
             ("sharpe_ratio", "夏普比率", "positive"),
@@ -299,28 +542,80 @@ class ReportGenerator:
             ("win_rate", "胜率", ""),
             ("total_return", "累计收益", "positive"),
             ("sortino_ratio", "Sortino比率", "positive"),
+            ("profit_factor", "盈亏比", "positive"),
         ]
 
         for key, label, cls in metric_order:
             val = self.metrics.get(key)
-            if val is not None:
+            if val is not None and val != float("inf"):
                 if key in ("annual_return", "total_return", "volatility", "max_drawdown", "win_rate"):
                     formatted = f"{val * 100:.2f}%"
+                elif key == "profit_factor":
+                    formatted = f"{val:.2f}"
                 else:
                     formatted = f"{val:.3f}"
                 pos_cls = cls if (val >= 0 and cls) else ("negative" if val < 0 else "")
-                html_parts.append(
-                    f'<div class="metric-card"><div class="metric-value {pos_cls}">{formatted}</div>'
-                    f'<div class="metric-label">{label}</div></div>'
-                )
+                metrics_display.append({"formatted": formatted, "label": label, "pos_cls": pos_cls})
+            elif val == float("inf"):
+                # 盈亏比为 inf（无亏损日），显示为 "∞"
+                metrics_display.append({"formatted": "∞", "label": label, "pos_cls": "positive"})
 
-        html_parts.append('</div></div>')
+        subtitle = (
+            f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+            f"基准: {BENCHMARK} | 行业标准: {INDUSTRY_STANDARD.upper()} | "
+            f"回测区间: {self.metrics.get('backtest_start', '—')} ~ {self.metrics.get('backtest_end', '—')} "
+            f"（{self.metrics.get('backtest_days', 0)} 个自然日 / {self.metrics.get('n_trading_days', 0)} 个交易日）"
+        )
 
-        for chart_html in self.charts:
-            html_parts.append(f'<div class="section"><div class="chart-container">{chart_html}</div></div>')
+        return render_page(
+            "backtest.html.j2",
+            title=self.title,
+            subtitle=subtitle,
+            metrics_display=metrics_display,
+            charts=self.charts,
+            factor_summary_html=self.factor_summary_html or "",
+            disclaimer=(
+                "本报告由 JingniTrader 基于历史行情与交易模拟自动生成，仅供学习研究用途，不构成任何投资建议。"
+                "回测结果基于历史数据与既定策略规则计算，历史业绩不代表未来收益；"
+                "回测可能存在过拟合、幸存者偏差、未完全反映市场冲击与流动性成本等局限，"
+                "实盘交易结果可能与回测存在显著差异。请结合自身风险承受能力谨慎决策。"
+            ),
+        )
 
-        html_parts.append(f'<div class="footer">Generated by jingnitrader</div></body></html>')
-        return ''.join(html_parts)
+
+def _compute_portfolio_exposure_timeseries(
+    portfolio_weights: pd.DataFrame,
+    factor_df: pd.DataFrame,
+    cols: List[str],
+) -> pd.DataFrame:
+    """计算持仓组合在指定因子上的逐日加权暴露（M3 单股/少股兜底）。
+
+    暴露_t = Σ_i (权重_i,t × 因子值_i,t)。返回含 date + cols 的 DataFrame。
+    """
+    if portfolio_weights is None or portfolio_weights.empty:
+        return pd.DataFrame()
+    if factor_df is None or factor_df.empty:
+        return pd.DataFrame()
+
+    avail = [c for c in cols if c in factor_df.columns]
+    if not avail:
+        return pd.DataFrame()
+
+    pw = portfolio_weights[["date", "code", "weight"]].copy()
+    merged = pw.merge(factor_df[["date", "code"] + avail], on=["date", "code"], how="left")
+    merged["weight"] = pd.to_numeric(merged["weight"], errors="coerce")
+
+    def _agg(g):
+        out = {}
+        for c in avail:
+            v = (g[c] * g["weight"]).sum()
+            out[c] = v if pd.notna(v) else None
+        return pd.Series(out)
+
+    try:
+        return merged.groupby("date").apply(_agg, include_groups=False).reset_index()
+    except TypeError:  # 兼容旧版 pandas
+        return merged.groupby("date").apply(_agg).reset_index()
 
 
 def _detect_report_template(ctx) -> str:
@@ -412,25 +707,26 @@ def _maybe_render_factor_analysis_report(ctx) -> str:
     if not metrics_list:
         return ""
 
-    # 渲染汇总 HTML
+    # 渲染汇总 HTML（M5: 统一惊泥科技样式）
     cards_html = []
     for m in metrics_list:
         verdict = m.get("suggested_verdict", "REVIEW")
-        verdict_color = {
-            "ACCEPT": "#28a745", "REVIEW": "#ffc107", "REJECT": "#dc3545"
-        }.get(verdict, "#6c757d")
+        verdict_cls = {
+            "ACCEPT": "signal-bullish", "REVIEW": "signal-warning", "REJECT": "signal-bearish"
+        }.get(verdict, "signal-neutral")
         factor_name = m.get("factor", "unknown")
         # 找到对应的因子报告 HTML（同目录下 <factor>_report.html）
         factor_html = os.path.join(alphalens_dir, f"{factor_name}_report.html")
         # relpath 基准使用运行时 work_dir/reports，与 output_path 一致
         _runtime_report_dir = os.path.join(_work_dir, "reports")
         factor_link = (
-            f'<a href="{os.path.relpath(factor_html, _runtime_report_dir)}" target="_blank">查看详情</a>'
+            f'<a href="{os.path.relpath(factor_html, _runtime_report_dir)}" target="_blank" '
+            f'class="factor-link">查看详情</a>'
             if os.path.exists(factor_html) else ""
         )
         cards_html.append(f"""
         <div class="factor-card">
-          <h3>{factor_name} <span class="verdict" style="background:{verdict_color}">{verdict}</span></h3>
+          <h3>{factor_name} <span class="signal-tag {verdict_cls}">{verdict}</span></h3>
           <div class="metrics-row">
             <span><b>IC 均值</b>: {m.get('ic_mean', 0):.4f}</span>
             <span><b>IC IR</b>: {m.get('ic_ir', 0):.4f}</span>
@@ -441,35 +737,54 @@ def _maybe_render_factor_analysis_report(ctx) -> str:
           <div class="link-row">{factor_link}</div>
         </div>""")
 
+    page_css = build_page_css()
+    nav_html = build_nav_bar_html()
+    footer_html = build_footer_html(disclaimer=(
+        "本报告由 JingniTrader 基于历史样本数据自动生成，仅供量化研究与学习用途，不构成任何投资建议。"
+        "因子有效性指标（IC、多空收益、夏普等）基于历史截面样本统计，属于历史检验结果；"
+        "统计上显著不代表未来仍有效，因子可能因市场结构变化、样本外失效或拥挤交易而衰减。"
+        "因子分析结论不构成选股或交易依据，实盘交易有风险，请谨慎决策。"
+    ))
+
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<title>因子分析汇总报告</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>因子分析报告</title>
 <style>
-  body {{ font-family: -apple-system, "Microsoft YaHei", sans-serif; margin: 24px; color: #333; }}
-  h1 {{ color: #1a3a6c; border-bottom: 2px solid #1a3a6c; padding-bottom: 8px; }}
-  .factor-card {{ background: #f8f9fa; padding: 16px; border-radius: 6px; margin: 12px 0; border-left: 4px solid #2c5282; }}
-  .factor-card h3 {{ margin: 0 0 8px 0; color: #2c5282; }}
-  .verdict {{ display: inline-block; padding: 2px 10px; border-radius: 10px; color: white; font-size: 12px; margin-left: 8px; }}
+  /* 统一页面布局 + 导航栏 + 底部版权栏（与其余报告一致） */
+  {page_css}
+  /* ── 因子分析报告特有样式 ── */
+  .factor-card {{ background: var(--card-bg); padding: 16px; border-radius: 8px; margin: 12px 0;
+                 border-left: 4px solid var(--jm-accent); box-shadow: var(--shadow); }}
+  .factor-card h3 {{ margin: 0 0 8px 0; color: var(--jm-primary); }}
+  .signal-warning {{ background: #fef3c7; color: #d97706; }}
   .metrics-row {{ display: flex; flex-wrap: wrap; gap: 16px; font-size: 14px; }}
-  .metrics-row span {{ background: white; padding: 4px 8px; border-radius: 3px; }}
+  .metrics-row span {{ background: var(--bg); padding: 4px 8px; border-radius: 3px; }}
   .link-row {{ margin-top: 8px; font-size: 13px; }}
-  .link-row a {{ color: #2c5282; text-decoration: none; }}
-  .link-row a:hover {{ text-decoration: underline; }}
-  footer {{ margin-top: 32px; color: #6c757d; font-size: 12px; text-align: center; }}
-  .summary {{ background: #e9ecef; padding: 12px; border-radius: 4px; margin: 16px 0; }}
+  .factor-link {{ color: var(--jm-secondary); text-decoration: none; font-weight: 500; }}
+  .factor-link:hover {{ color: var(--jm-accent); text-decoration: underline; }}
 </style>
 </head>
 <body>
-<h1>因子分析汇总报告</h1>
-<p>生成时间：{datetime.now().strftime("%Y-%m-%d %H:%M:%S")} ｜ 任务 ID：{task_id}</p>
-<div class="summary">共分析 <b>{len(metrics_list)}</b> 个因子。
-ACCEPT 数量：{sum(1 for m in metrics_list if m.get('suggested_verdict') == 'ACCEPT')}
-｜ REVIEW 数量：{sum(1 for m in metrics_list if m.get('suggested_verdict') == 'REVIEW')}
+{nav_html}
+
+<div class="header">
+    <h1>因子分析报告</h1>
+    <p>生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | 任务 ID: {task_id}</p>
 </div>
+
+<div class="section">
+    <h2>因子汇总</h2>
+    共分析 <b>{len(metrics_list)}</b> 个因子。
+    ACCEPT 数量：{sum(1 for m in metrics_list if m.get('suggested_verdict') == 'ACCEPT')}
+    ｜ REVIEW 数量：{sum(1 for m in metrics_list if m.get('suggested_verdict') == 'REVIEW')}
+</div>
+
 {''.join(cards_html)}
-<footer>由 jingni-trader reports-engine 自动聚合 alphalens metrics 生成</footer>
+
+{footer_html}
 </body>
 </html>"""
 
@@ -564,6 +879,25 @@ def _run_template_report(ctx) -> Dict[str, Any]:
     if factor_report_path:
         generated_paths.append(factor_report_path)
 
+    # 更新报告门户（technical 和 fundamental 分别注册，同类型不同文件共存）。
+    # 因子分析报告（factor_analysis_report.html）不进门户，生成后直接打开文件。
+    for path in generated_paths:
+        fname = os.path.basename(path)
+        if "factor_analysis" in fname:
+            logger.info("因子分析报告不注册到门户（生成后直接打开）: %s", path)
+            continue
+        if "technical" in fname:
+            _title = "个股分析-技术面"
+            _rtype = "technical_report"
+        elif "fundamental" in fname:
+            _title = "个股分析-基本面"
+            _rtype = "fundamental_report"
+        else:
+            _title = ""
+            _rtype = "report"
+        _update_report_portal(path, _rtype, title=_title,
+                              task_id=ctx.task_id if hasattr(ctx, 'task_id') else "")
+
     primary_path = generated_paths[0]
     report_data = {
         "report_template": template_choice,
@@ -588,6 +922,41 @@ def _run_template_report(ctx) -> Dict[str, Any]:
         },
         "error": ""
     }
+
+
+def _update_report_portal(
+    html_path: str,
+    report_type: str,
+    title: str = "",
+    task_id: str = "",
+    live: bool = False,
+    **extra: Any,
+) -> None:
+    """报告生成成功后更新 manifest.json 并刷新门户页 index.html。
+
+    参数:
+        html_path: 报告 HTML 文件绝对路径
+        report_type: 报告类型（technical_report/fundamental_report/portfolio/execution/attribution/backtest）
+        title: 报告标题（空时按类型取默认）
+        task_id: 任务 ID
+        live: 是否为 LIVE 实时报告
+        **extra: 额外字段（如 backend/snapshot_file）
+    """
+    try:
+        from scripts.report_portal import upsert_report, generate_portal
+        _report_dir = os.path.dirname(html_path)
+        upsert_report(
+            report_dir=_report_dir,
+            report_type=report_type,
+            file_path=html_path,
+            title=title or None,
+            task_id=task_id,
+            live=live,
+            **extra,
+        )
+        generate_portal(_report_dir)
+    except Exception as e:
+        logger.warning(f"更新报告门户失败（不阻断）: {e}")
 
 
 def _inject_deep_analysis(
@@ -1059,6 +1428,167 @@ def _inject_attribution_analysis(
         logger.info(f"绩效归因解读已注入: {html_path}")
 
 
+def _run_portfolio_report(ctx) -> Dict[str, Any]:
+    """组合优化报告生成路径（F-P0-2 权重分布图）。
+
+    流程：
+    1. 定位 PORTFOLIO 产物（portfolio_weights.json）
+    2. 从 ctx.metadata 提取 portfolio-risk-engine 的 metadata
+    3. 加载 FACTOR 产物的 industry 列（可选，用于行业着色）
+    4. 调用 portfolio_report.build_portfolio_report 生成 HTML
+    5. 落盘到 REPORT_DIR/portfolio_report.html
+
+    数据缺失容错：任一上游字段缺失时显示「数据不可用」占位，不阻塞生成。
+    """
+    from scripts.templates.portfolio_report import build_portfolio_report
+
+    _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+    _report_dir = os.path.join(_work_dir, "reports")
+    os.makedirs(_report_dir, exist_ok=True)
+
+    # 1. 定位 PORTFOLIO 产物
+    portfolio_artifact = ctx.get_artifact("PORTFOLIO") if hasattr(ctx, 'get_artifact') else None
+    if not portfolio_artifact:
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": "未找到 PORTFOLIO 产物，无法生成组合优化报告。请先执行组合优化。"
+        }
+
+    # 2. 提取 metadata（portfolio-risk-engine run() 返回的 metadata 通过 ctx.metadata 传递）
+    meta = getattr(ctx, 'metadata', {}) or {}
+    portfolio_metadata = meta.get("portfolio_metadata", {}) or {}
+
+    # 3. 加载 FACTOR 产物路径（用于行业着色，可选）
+    factor_path = ctx.get_artifact("FACTOR") if hasattr(ctx, 'get_artifact') else None
+
+    # 4. 生成 HTML 报告
+    try:
+        html_content = build_portfolio_report(
+            portfolio_artifact_path=portfolio_artifact,
+            portfolio_metadata=portfolio_metadata,
+            factor_path=factor_path,
+            chart_theme=CHART_THEME,
+        )
+
+        html_path = os.path.join(_report_dir, "portfolio_report.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        logger.info(f"组合优化报告已生成: {html_path}")
+
+        _update_report_portal(html_path, "portfolio", task_id=ctx.task_id if hasattr(ctx, 'task_id') else "")
+
+        return {
+            "success": True,
+            "artifact_path": html_path,
+            "metadata": {
+                "report_type": "portfolio",
+                "num_assets": portfolio_metadata.get("num_assets", 0),
+                "optimization_method": portfolio_metadata.get("optimization_method", "unknown"),
+            },
+            "error": ""
+        }
+    except Exception as e:
+        logger.exception("组合优化报告生成失败")
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": str(e)
+        }
+
+
+def _run_execution_report(ctx) -> Dict[str, Any]:
+    """执行监控报告生成路径（F-P0-1 状态条 + F-P0-3 仪表盘 + F-P0-4 风控）。
+
+    流程：
+    1. 定位 EXECUTION 产物（trade_log.jsonl 所在目录）
+    2. 从 ctx.metadata 提取 execution-monitor-engine 的 metadata
+    3. 从 ctx.metadata 提取 portfolio-risk-engine 的 stop_signals（跨引擎引用）
+    4. 调用 execution_report.build_execution_report 生成 HTML
+    5. 落盘到 REPORT_DIR/execution_report.html
+
+    数据缺失容错：任一上游字段缺失时显示「数据不可用」占位，不阻塞生成。
+    """
+    from scripts.templates.execution_report import build_execution_report
+
+    _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+    _report_dir = os.path.join(_work_dir, "reports")
+    os.makedirs(_report_dir, exist_ok=True)
+
+    # 1. 定位 EXECUTION 产物
+    execution_artifact = ctx.get_artifact("EXECUTION") if hasattr(ctx, 'get_artifact') else None
+    if not execution_artifact:
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": "未找到 EXECUTION 产物，无法生成执行监控报告。请先执行模拟/实盘交易。"
+        }
+
+    execution_dir = os.path.dirname(execution_artifact) if os.path.isfile(execution_artifact) else execution_artifact
+    audit_log_path = os.path.join(execution_dir, "trade_log.jsonl")
+    ledger_path = os.path.join(execution_dir, "ledger.jsonl")
+
+    # 2. 提取 metadata
+    meta = getattr(ctx, 'metadata', {}) or {}
+    execution_metadata = meta.get("execution_metadata", {}) or {}
+
+    # 3. 提取止损信号（跨引擎引用，来自 portfolio-risk-engine）
+    portfolio_metadata = meta.get("portfolio_metadata", {}) or {}
+    stop_signals = portfolio_metadata.get("stop_signals", {}) or {}
+
+    # 4. 读取风控阈值（从环境变量或使用默认值）
+    max_daily_loss_ratio = float(os.environ.get(
+        "MAX_DAILY_LOSS_RATIO",
+        os.environ.get("QUANT_MAX_DAILY_LOSS_RATIO", "0.02")
+    ))
+    max_single_order_ratio = float(os.environ.get(
+        "MAX_SINGLE_ORDER_RATIO",
+        os.environ.get("QUANT_MAX_SINGLE_ORDER_RATIO", "0.10")
+    ))
+    max_order_frequency = int(os.environ.get(
+        "MAX_ORDER_FREQUENCY",
+        os.environ.get("QUANT_MAX_ORDER_FREQUENCY", "2")
+    ))
+
+    # 5. 生成 HTML 报告
+    try:
+        html_content = build_execution_report(
+            execution_metadata=execution_metadata,
+            audit_log_path=audit_log_path,
+            ledger_path=ledger_path,
+            stop_signals=stop_signals,
+            max_daily_loss_ratio=max_daily_loss_ratio,
+            max_single_order_ratio=max_single_order_ratio,
+            max_order_frequency=max_order_frequency,
+        )
+
+        html_path = os.path.join(_report_dir, "execution_report.html")
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        logger.info(f"执行监控报告已生成: {html_path}")
+
+        _update_report_portal(
+            html_path, "execution",
+            task_id=ctx.task_id if hasattr(ctx, 'task_id') else "",
+            backend=execution_metadata.get("backend", ""),
+        )
+
+        return {
+            "success": True,
+            "artifact_path": html_path,
+            "metadata": {
+                "report_type": "execution",
+                "mode": execution_metadata.get("mode", "paper"),
+                "orders_executed": execution_metadata.get("orders_executed", 0),
+                "orders_failed": execution_metadata.get("orders_failed", 0),
+            },
+            "error": ""
+        }
+    except Exception as e:
+        logger.exception("执行监控报告生成失败")
+        return {
+            "success": False, "artifact_path": "", "metadata": {},
+            "error": str(e)
+        }
+
+
 def _run_attribution_report(ctx) -> Dict[str, Any]:
     """绩效归因报告生成路径
 
@@ -1175,6 +1705,8 @@ def _run_attribution_report(ctx) -> Dict[str, Any]:
         f.write(html)
     logger.info(f"绩效归因报告已生成: {html_path}")
 
+    _update_report_portal(html_path, "attribution", task_id=ctx.task_id if hasattr(ctx, 'task_id') else "")
+
     # 7. 准备 LLM prompt
     llm_prompts = {
         "attribution": _build_attribution_llm_prompt(
@@ -1255,12 +1787,22 @@ def run(ctx) -> Dict[str, Any]:
         logger.info("检测到绩效复盘意图，生成绩效归因报告")
         return _run_attribution_report(ctx)
 
-    # 优先级 2: 有 BACKTEST 产物 → 回测绩效报告
+    # 优先级 2: 组合优化意图 → 组合优化报告
+    if meta.get("report_intent") == "portfolio":
+        logger.info("检测到组合优化意图，生成组合优化报告")
+        return _run_portfolio_report(ctx)
+
+    # 优先级 3: 执行监控意图 → 执行监控报告
+    if meta.get("report_intent") == "execution":
+        logger.info("检测到执行监控意图，生成执行监控报告")
+        return _run_execution_report(ctx)
+
+    # 优先级 4: 有 BACKTEST 产物 → 回测绩效报告
     backtest_path = ctx.get_artifact("BACKTEST") if hasattr(ctx, 'get_artifact') else None
     has_backtest = backtest_path and os.path.exists(backtest_path)
 
     if not has_backtest:
-        # 优先级 3: 默认 → 模板化个股分析报告
+        # 优先级 5: 默认 → 模板化个股分析报告
         return _run_template_report(ctx)
 
     try:
@@ -1301,48 +1843,148 @@ def run(ctx) -> Dict[str, Any]:
             if heatmap:
                 generator.charts.append(heatmap)
 
+        # ── 补充 quantstats 独有维度：滚动收益 ──
+        # 注：回撤可视化已由三联动图（净值+回撤+暴露度）的中间面板覆盖，
+        # 不再单独追加水下曲线图，避免回撤图表重复。
+        rolling_chart = generator.make_rolling_return_chart(equity_curve)
+        if rolling_chart:
+            generator.charts.append(rolling_chart)
+
         if INCLUDE_ATTRIBUTION:
-            industry_contributions = {}
+            # ── M2/M3: 因子归因（基于回测持仓权重，而非全股票池截面） ──
+            bt_dir = os.path.dirname(backtest_path) if backtest_path else ""
+            pw_path = os.path.join(bt_dir, "portfolio_weights.parquet") if bt_dir else ""
+            fe_path = os.path.join(bt_dir, "factor_exposures.parquet") if bt_dir else ""
+
+            portfolio_weights = pd.DataFrame()
+            if pw_path and os.path.exists(pw_path):
+                try:
+                    portfolio_weights = pd.read_parquet(pw_path)
+                except Exception as e:
+                    logger.warning("读取 portfolio_weights 失败: %s", e)
+
+            factor_exposures = pd.DataFrame()
+            if fe_path and os.path.exists(fe_path):
+                try:
+                    factor_exposures = pd.read_parquet(fe_path)
+                except Exception as e:
+                    logger.warning("读取 factor_exposures 失败: %s", e)
+
+            # 持仓股票数 → 决定截面归因 or 时序归因
+            n_held = portfolio_weights["code"].nunique() if not portfolio_weights.empty else 0
+            is_single = n_held < 5
+
+            factor_df = pd.DataFrame()
             if factor_path and os.path.exists(factor_path):
-                factor_df = pd.read_parquet(factor_path)
-                if 'industry' in factor_df.columns:
-                    latest = factor_df[factor_df['date'] == factor_df['date'].max()]
-                    for ind in latest['industry'].dropna().unique()[:10]:
-                        ind_data = latest[latest['industry'] == ind]
-                        if 'alpha_score' in ind_data.columns:
-                            industry_contributions[ind] = float(ind_data['alpha_score'].mean())
+                try:
+                    factor_df = pd.read_parquet(factor_path)
+                except Exception as e:
+                    logger.warning("读取 factor_data 失败: %s", e)
 
-            if industry_contributions:
-                ind_chart = generator.make_industry_attribution_chart(industry_contributions)
-                if ind_chart:
-                    generator.charts.append(ind_chart)
+            style_map = {
+                "size": "市值", "value": "价值", "momentum": "动量",
+                "volatility": "波动率", "quality": "质量", "growth": "成长",
+            }
+            style_cols = [c for c in style_map if c in factor_df.columns]
 
-            style_exposures = {}
-            if factor_path and os.path.exists(factor_path):
-                factor_df = pd.read_parquet(factor_path)
-                style_cols = [c for c in factor_df.columns
-                              if c.lower() in ("size", "value", "momentum", "volatility", "quality", "growth")]
-                if style_cols:
-                    latest = factor_df[factor_df['date'] == factor_df['date'].max()]
-                    style_map = {
-                        "size": "市值", "value": "价值", "momentum": "动量",
-                        "volatility": "波动率", "quality": "质量", "growth": "成长",
-                    }
-                    for col in style_cols:
-                        val = latest[col].mean()
-                        if pd.notna(val):
-                            style_exposures[style_map.get(col.lower(), col)] = float(val)
+            if is_single:
+                # ── 单股/少股：时序因子暴露（单图 + 下拉切换因子，避免页面过长） ──
+                logger.info("M3 归因: 单股/少股模式（持仓 %d 只），展示时序因子暴露（单图切换）", n_held)
+                ts_cols = [c for c in ["alpha_score"] + style_cols if c in factor_exposures.columns]
+                ts_source = factor_exposures
+                if not ts_cols and not factor_df.empty:
+                    # 兜底：用持仓组合的逐日加权暴露（无 M2 产物时）
+                    try:
+                        ts_source = _compute_portfolio_exposure_timeseries(
+                            portfolio_weights, factor_df,
+                            ["alpha_score"] + style_cols)
+                        ts_cols = [c for c in ["alpha_score"] + style_cols if c in ts_source.columns]
+                    except Exception as e:
+                        logger.warning("时序暴露计算失败: %s", e)
+                if ts_cols:
+                    ts_labels = {c: style_map.get(c, c) for c in ts_cols}
+                    # ── 净值曲线(上) + 回撤(中) + 因子暴露(下) 联动三面板：替换独立净值图，不再追加独立多图 ──
+                    linked_chart = generator.make_equity_exposure_linked_chart(
+                        equity_curve, ts_source, ts_cols, ts_labels)
+                    if linked_chart:
+                        # 净值图总是 charts 的首个元素，用联动图替换它
+                        if generator.charts:
+                            generator.charts[0] = linked_chart
+                        else:
+                            generator.charts.append(linked_chart)
+                    else:
+                        # 联动图生成失败时回退：保留独立净值图，追加独立多图
+                        multi_chart = generator.make_factor_exposure_multi_chart(
+                            ts_source, ts_cols, ts_labels)
+                        if multi_chart:
+                            generator.charts.append(multi_chart)
+            else:
+                # ── 多股：持仓权重加权风格暴露 + 行业归因 ──
+                logger.info("M3 归因: 多股模式（持仓 %d 只），展示截面归因", n_held)
+                # 风格暴露：取最新一期的组合持仓加权暴露
+                style_exposures = {}
+                if not factor_exposures.empty:
+                    latest = factor_exposures.sort_values("date")
+                    if not latest.empty:
+                        last_row = latest.iloc[-1]
+                        for col in style_cols:
+                            if col in last_row.index and pd.notna(last_row[col]):
+                                style_exposures[style_map[col]] = float(last_row[col])
+                if style_exposures:
+                    style_chart = generator.make_style_exposure_chart(style_exposures)
+                    if style_chart:
+                        generator.charts.append(style_chart)
 
-            if style_exposures:
-                style_chart = generator.make_style_exposure_chart(style_exposures)
-                if style_chart:
-                    generator.charts.append(style_chart)
+                # 行业归因：按持仓行业分组算 alpha 贡献
+                industry_contributions = {}
+                if "industry" in factor_df.columns and "alpha_score" in factor_df.columns:
+                    latest_factor = factor_df[factor_df['date'] == factor_df['date'].max()]
+                    if not portfolio_weights.empty:
+                        held = set(portfolio_weights['code'].unique())
+                        latest_factor = latest_factor[latest_factor['code'].isin(held)]
+                    for ind in latest_factor['industry'].dropna().unique()[:10]:
+                        ind_data = latest_factor[latest_factor['industry'] == ind]
+                        industry_contributions[ind] = float(ind_data['alpha_score'].mean())
+                if industry_contributions:
+                    ind_chart = generator.make_industry_attribution_chart(industry_contributions)
+                    if ind_chart:
+                        generator.charts.append(ind_chart)
+
+        # ── M4: 策略因子清单章节（交叉引用 strategy_factors.json） ──
+        _sf_path = os.path.join(os.path.dirname(backtest_path), "strategy_factors.json") if backtest_path else ""
+        if _sf_path and os.path.exists(_sf_path):
+            try:
+                with open(_sf_path, "r", encoding="utf-8") as _f:
+                    _sf = json.load(_f)
+                _factors = _sf.get("factors", [])
+                if _factors:
+                    _rows = []
+                    for _it in _factors:
+                        _name = _it.get("name", "?")
+                        _verdict = _it.get("verdict", "NA")
+                        _cls = {"ACCEPT": "signal-bullish", "REVIEW": "signal-warning",
+                                "REJECT": "signal-bearish"}.get(_verdict, "signal-neutral")
+                        _rows.append(
+                            f'<tr><td><b>{_name}</b></td>'
+                            f'<td><span class="signal-tag {_cls}">{_verdict}</span></td></tr>'
+                        )
+                    _filtered = "已启用（仅用 ACCEPT/REVIEW）" if _sf.get("alphalens_filter") else "未启用（全部因子）"
+                    generator.factor_summary_html = (
+                        f'<p class="analysis-hint">策略构建使用的因子清单 '
+                        f'（alphalens 有效性筛选：{_filtered}）</p>'
+                        f'<table><thead><tr><th>因子</th><th>alphalens 判定</th></tr></thead>'
+                        f'<tbody>{"".join(_rows)}</tbody></table>'
+                    )
+            except Exception as _e:
+                logger.warning("M4: 读取 strategy_factors.json 失败: %s", _e)
 
         html_report = generator.build_html_report()
         html_path = os.path.join(REPORT_DIR, "report.html")
         with open(html_path, "w", encoding="utf-8") as f:
             f.write(html_report)
         logger.info(f"HTML 报告已生成: {html_path}")
+
+        _update_report_portal(html_path, "backtest", task_id=ctx.task_id if hasattr(ctx, 'task_id') else "")
 
         report_data = {
             "title": REPORT_TITLE,

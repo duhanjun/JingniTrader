@@ -9,7 +9,7 @@ import json
 import logging
 import importlib
 import importlib.util as _ilu
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 from scripts.config import (
@@ -164,6 +164,93 @@ DATA_SOURCE_NAMES = {
 # 默认免费降级链（用户只指定首选源时，自动追加在后面作为兜底）
 # 仅含真正免费、无需 token/账号的源；tushare/wind/ifind 等 opt-in 源不在此列
 _DEFAULT_FALLBACK_CHAIN = ["baostock", "akshare", "websearch"]
+
+
+# ── 个股代码/名称提取（方案 E：个股分析场景）────────────────────────
+# 用户输入 "分析 002594.SZ 比亚迪" 时，需要从中提取个股代码写入 ctx.stock_pool，
+# 否则会退化为全市场（数千只股票）拉取，导致个股分析无法正确执行。
+#
+# 支持的匹配方式：
+#   1. 标准 A 股代码：6 位数字 + .SH/.SZ/.BJ 后缀（如 002594.SZ / 000001.SZ / 600000.SH）
+#   2. 裸 6 位数字代码（如 002594），自动补全交易所后缀
+#   3. 常见股票名称 → 代码映射（内置精选，支持"比亚迪/平安银行/茅台/宁德时代"等）
+#
+# 命中后写入 ctx.stock_pool，data-engine 据此只拉取该个股而非全市场。
+
+# 常见股票名称 → 代码映射（仅覆盖高频个股，其余可通过代码指定）
+COMMON_STOCK_NAME_MAP = {
+    "比亚迪": "002594.SZ",
+    "平安银行": "000001.SZ",
+    "贵州茅台": "600519.SH",
+    "茅台": "600519.SH",
+    "宁德时代": "300750.SZ",
+    "招商银行": "600036.SH",
+    "中国平安": "601318.SH",
+    "五粮液": "000858.SZ",
+    "隆基绿能": "601012.SH",
+    "美的集团": "000333.SZ",
+    "格力电器": "000651.SZ",
+    "伊利股份": "600887.SH",
+    "恒瑞医药": "600276.SH",
+    "药明康德": "603259.SH",
+    "中信证券": "600030.SH",
+    "东方财富": "300059.SZ",
+    "万科A": "000002.SZ",
+    "工商银行": "601398.SH",
+    "建设银行": "601939.SH",
+    "中国石油": "601857.SH",
+    "三一重工": "600031.SH",
+    "京东方A": "000725.SZ",
+}
+
+
+def _extract_stock_codes(user_input: str) -> List[str]:
+    """从用户输入中提取个股代码。
+
+    返回匹配到的股票代码列表（去重、保持出现顺序）；未命中返回空列表。
+
+    匹配规则：
+    1. 标准代码：6 位数字 + .SH/.SZ/.BJ（大写/小写均可），如 002594.SZ
+    2. 裸 6 位数字：命中后补全交易所后缀
+    3. 常见股票名称：命中内置映射表
+    """
+    import re
+
+    if not user_input:
+        return []
+
+    found: List[str] = []
+    seen = set()
+
+    def _add(code: str):
+        if code and code not in seen:
+            seen.add(code)
+            found.append(code)
+
+    # 1) 标准 A 股代码：6 位数字 + 交易所后缀（.SH/.SZ/.BJ，不区分大小写）
+    for m in re.finditer(r"\b(\d{6})\s*[.．](SH|SZ|BJ)\b", user_input, flags=re.IGNORECASE):
+        _add(f"{m.group(1)}.{m.group(2).upper()}")
+
+    # 2) 裸 6 位数字代码（未被上面的标准格式捕获，且位于合理语境中）
+    #    防止误匹配日期/数字：仅当 6 位数字作为独立 token 出现时才补全
+    for m in re.finditer(r"(?<![.\d])(\d{6})(?![.\d])", user_input):
+        code = m.group(1)
+        if any(x in code for x in ("",)):
+            pass
+        # 按 A 股代码段位补全后缀
+        if code[0] in ("6", "5", "9"):
+            _add(f"{code}.SH")
+        elif code[0] in ("0", "3", "2"):
+            _add(f"{code}.SZ")
+        elif code[0] in ("4", "8"):
+            _add(f"{code}.BJ")
+
+    # 3) 常见股票名称
+    for name, code in COMMON_STOCK_NAME_MAP.items():
+        if name in user_input:
+            _add(code)
+
+    return found
 
 
 class MasterEngine:
@@ -358,7 +445,14 @@ class MasterEngine:
         target_stages = sorted(target_stages, key=lambda s: STAGE_ORDER.get(s, 99))
         ctx.target_stages = target_stages
 
-        if "沪深300" in user_input:
+        # 个股代码/名称提取（方案 E）：优先于指数/全市场判定。
+        # 用户明确提到个股代码或常见股票名时，写入 ctx.stock_pool，仅拉取该个股。
+        # 例如 "分析 002594.SZ 比亚迪" / "分析 比亚迪" / "用 wind 取数据，分析 000001.SZ 平安银行"
+        stock_codes = _extract_stock_codes(user_input)
+        if stock_codes:
+            ctx.stock_pool = stock_codes
+            logger.info(f"检测到个股代码/名称 → ctx.stock_pool={ctx.stock_pool}")
+        elif "沪深300" in user_input:
             ctx.stock_pool = ["000300.SH"]
         elif "中证500" in user_input:
             ctx.stock_pool = ["000905.SH"]

@@ -79,6 +79,7 @@ class NativeAdapter(BaseBacktestEngine):
         trades = []
         gross_equity_records = []  # 不含费用的权益
         cumulative_fees = 0.0  # 累计已支付费用
+        position_weight_records = []  # M2: 每日 per-stock 市值权重（供因子归因）
 
         # 预提取基准净值（若有）
         benchmark_prices = {}
@@ -178,13 +179,27 @@ class NativeAdapter(BaseBacktestEngine):
 
             # ---- 估值 ----
             market_value = 0.0
+            stock_mv: Dict[str, float] = {}
             for code, pos in positions.items():
                 if pos.shares <= 0:
                     continue
                 if code in day_data_map.index:
                     close = float(day_data_map.loc[code, 'close'])
-                    market_value += pos.shares * close
+                    mv = pos.shares * close
+                    stock_mv[code] = mv
+                    market_value += mv
             total_equity = cash + market_value
+
+            # M2: 记录每日 per-stock 市值权重（供回测报告因子归因）
+            if total_equity > 0:
+                for code, mv in stock_mv.items():
+                    position_weight_records.append({
+                        'date': dt,
+                        'code': code,
+                        'weight': mv / total_equity,
+                        'market_value': mv,
+                    })
+
             equity_records.append({
                 'date': dt,
                 'equity': total_equity,
@@ -202,6 +217,7 @@ class NativeAdapter(BaseBacktestEngine):
         equity_curve = pd.DataFrame(equity_records)
         gross_curve = pd.DataFrame(gross_equity_records)
         trades_df = pd.DataFrame(trades)
+        portfolio_weights = pd.DataFrame(position_weight_records)
 
         if equity_curve.empty:
             return self._empty_result()
@@ -227,6 +243,7 @@ class NativeAdapter(BaseBacktestEngine):
             ),
             "equity_curve": equity_curve,
             "gross_equity_curve": gross_curve,
+            "portfolio_weights": portfolio_weights,  # M2: 每日 per-stock 市值权重
             "metrics": metrics,
             "report_path": "",
         }
@@ -315,6 +332,7 @@ class NativeAdapter(BaseBacktestEngine):
             "positions": pd.DataFrame(),
             "equity_curve": pd.DataFrame(),
             "gross_equity_curve": pd.DataFrame(),
+            "portfolio_weights": pd.DataFrame(),  # M2
             "metrics": {},
             "report_path": "",
         }

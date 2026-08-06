@@ -118,6 +118,7 @@ jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 
 | 用户意图 | 触发条件 | 阶段路径 | 报告类型 |
 |------|---------|---------|---------|
+| **绩效复盘/归因**（`report_intent=attribution`） | 包含"绩效归因/归因分析/复盘/实盘报告/盈亏分析/执行报告/交易复盘/绩效复盘"等关键词（**最高优先级**） | DATA → FACTOR → EXECUTION → REPORT（跳过 MODEL/BACKTEST/PORTFOLIO） | 绩效归因报告（Round-Trip 归因/成本分析/压力期表现） |
 | **策略构建**（`strategy_required=True`） | 包含"回测/策略/模型/组合/实盘/选股/风控/下单"等动作关键词 | DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT | 策略回测绩效报告（夏普/回撤/归因） |
 | **分析（默认）**（`strategy_required=False`） | 未命中策略构建关键词（含"分析/技术面/基本面/因子/alpha/ic"等） | DATA → FACTOR → REPORT | 个股深度分析报告（技术面+基本面） |
 
@@ -313,7 +314,7 @@ result = engine.run_pipeline(
 
 ```python
 from engine import run, MasterEngine
-from context import Context
+from scripts.context import Context
 
 # 创建 Context
 ctx = Context(
@@ -344,14 +345,21 @@ result = engine.run_pipeline(
 python engine.py -i "帮我用近3年A股数据做一个20日反转因子选股回测"
 
 # 指定参数
-python engine.py --task-id test001 --stock-pool 000001.SZ,600000.SH --start-date 2021-01-01 --end-date 2024-01-01
+python engine.py -i "分析 002594.SZ 比亚迪的技术面和基本面"
 
-# 仅生成报告
-python engine.py -i "生成上个月实盘绩效报告"
+# 用已有 Context JSON 恢复运行
+python engine.py -c ./workspace/context.json
 
-# 强制刷新（忽略缓存）
+# 仅生成报告（输出到指定 JSON 文件）
+python engine.py -i "生成上个月实盘绩效报告" -o ./workspace/result.json
+
+# 强制刷新（忽略缓存，重新执行所有阶段）
 python engine.py -i "分析比亚迪基本面" --force
 ```
+
+> 说明：当前 CLI 仅支持 `-i/--input`（必填）、`-c/--context`、`-o/--output`、`--force` 四个参数。
+> 股票池、日期范围等任务参数请在 `-i` 的自然语言描述中指定（如 `"分析 002594.SZ 比亚迪"`），
+> 由意图解析自动提取，无需额外的命令行参数。
 
 ## 子 Skill 映射
 

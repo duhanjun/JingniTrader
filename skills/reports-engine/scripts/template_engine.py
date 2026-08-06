@@ -19,7 +19,35 @@ from datetime import datetime
 
 import pandas as pd
 
+# 惊泥科技统一样式公共组件（顶部导航栏 + 底部版权栏，与门户页/交易监控报告一致）
+try:
+    from scripts.templates.common_components import (
+        build_nav_bar_css, build_nav_bar_html, build_footer_html,
+    )
+except Exception:  # pragma: no cover - 兼容旧部署
+    def build_nav_bar_css() -> str: return ""
+    def build_nav_bar_html(report_title: str = "") -> str: return ""
+    def build_footer_html() -> str: return ""
+
 logger = logging.getLogger("template_engine")
+
+# 各报告定制免责声明（按 template_name 匹配）
+_DISCLAIMERS = {
+    "技术分析报告": (
+        "本报告由 JingniTrader 基于历史行情数据自动生成，仅供学习研究用途，不构成任何投资建议。"
+        "技术分析指标（均线、MACD、RSI、KDJ 等）均基于历史价格计算，具有滞后性，"
+        "对未来走势的预测存在较大不确定性。技术信号可能因市场环境变化而失效，"
+        "请勿仅依据本报告技术分析结论进行交易决策，实盘交易有风险，请谨慎操作。"
+    ),
+    "基本面分析报告": (
+        "本报告由 JingniTrader 基于公开财务数据与估值数据自动生成，仅供学习研究用途，"
+        "不构成任何投资建议。财务数据来源于历史定期报告与公告，存在更新滞后，"
+        "且公司经营、行业环境与市场估值均可能发生超出预期的变化。"
+        "估值判断（如 PE/PB 分位）具有主观性，不同方法结论可能不同。"
+        "投资决策请结合最新公开信息独立判断，实盘交易有风险，请谨慎操作。"
+    ),
+}
+
 
 # 模板配置目录
 _TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates", "config")
@@ -152,8 +180,17 @@ class ReportTemplateEngine:
             except Exception as e:
                 logger.warning(f"读取因子数据失败: {e}")
 
-        # 取第一只股票
-        stock_code = str(price_data['code'].iloc[0]) if 'code' in price_data.columns else ""
+        # 优先使用 ctx.stock_pool 指定的标的（个股分析场景），避免多标的
+        # 数据时误取首行代码导致选错股票。仅当 ctx.stock_pool 为空或数据中
+        # 无匹配时才回退到数据首行代码。
+        stock_code = ""
+        if hasattr(ctx, 'stock_pool') and getattr(ctx, 'stock_pool', None):
+            for code in ctx.stock_pool:
+                if 'code' in price_data.columns and code in price_data['code'].astype(str).values:
+                    stock_code = str(code)
+                    break
+        if not stock_code:
+            stock_code = str(price_data['code'].iloc[0]) if 'code' in price_data.columns else ""
         stock_name = stock_code
         ohlcv = price_data[price_data['code'] == stock_code].sort_values('date') if stock_code else price_data
         current_price = float(ohlcv.iloc[-1]['close']) if len(ohlcv) > 0 else 0.0
@@ -486,8 +523,13 @@ class ReportTemplateEngine:
         deep_html: str,
         risk_html: str,
     ) -> str:
-        """组装完整 HTML 报告"""
+        """组装完整 HTML 报告（惊泥科技统一样式：顶部导航栏 + 正文卡片 + 底部版权栏）"""
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+        # 惊泥科技公共组件（与门户页 / 交易监控报告样式一致）
+        nav_css = build_nav_bar_css()
+        nav_html = build_nav_bar_html(report_title="")
+        footer_html = build_footer_html(disclaimer=_DISCLAIMERS.get(template_name, ""))
 
         return f'''<!DOCTYPE html>
 <html lang="zh-CN">
@@ -496,72 +538,108 @@ class ReportTemplateEngine:
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{template_name} - {stock_name}({stock_code})</title>
     <style>
+        /* ═══ 惊泥科技配色卡 ═══
+           主色 #17223b | 辅助 #263859 | 文字 #6b778d | 强调 #ff6768 */
+        :root {{
+            --jm-primary: #17223b;
+            --jm-secondary: #263859;
+            --jm-text: #6b778d;
+            --jm-accent: #ff6768;
+            --bg: #f5f6f8; --card-bg: #ffffff;
+            --text: #17223b; --text-muted: #6b778d; --border: #e5e7eb;
+            --up: #ff6768; --down: #12a05c;
+            --danger: #ff6768; --warning: #f59e0b; --success: #10b981;
+            --shadow: 0 1px 3px rgba(23,34,59,0.08);
+        }}
+        * {{ box-sizing: border-box; }}
         body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; color: #333; }}
-        .header {{ background: linear-gradient(135deg, #1f77b4, #2ca02c); color: white;
-                   padding: 30px 40px; border-radius: 12px; margin-bottom: 24px; }}
+               max-width: 1200px; margin: 0 auto; padding: 20px; background: var(--bg); color: var(--text); }}
+        .header {{ background: linear-gradient(135deg, #17223b, #263859); color: white;
+                   padding: 30px 40px; border-radius: 12px; margin-bottom: 24px;
+                   border-bottom: 3px solid var(--jm-accent);
+                   box-shadow: 0 4px 12px rgba(23,34,59,0.15); }}
         .header h1 {{ margin: 0 0 8px 0; font-size: 26px; }}
         .header p {{ margin: 0; opacity: 0.9; font-size: 14px; }}
-        .section {{ background: white; border-radius: 10px; padding: 24px; margin-bottom: 20px;
-                    box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
-        .section h2 {{ margin: 0 0 16px 0; font-size: 18px; color: #444;
-                       border-bottom: 2px solid #eee; padding-bottom: 8px; }}
+        .section {{ background: var(--card-bg); border-radius: 10px; padding: 24px; margin-bottom: 20px;
+                    box-shadow: var(--shadow); border: 1px solid #f3f4f6; }}
+        .section h2 {{ margin: 0 0 16px 0; font-size: 18px; color: var(--jm-primary);
+                       border-bottom: 2px solid var(--jm-accent); padding-bottom: 8px; }}
         .chart-container {{ width: 100%; overflow-x: auto; }}
         .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
                          gap: 16px; }}
         .metric-card {{ background: #f9f9f9; padding: 16px; border-radius: 8px; text-align: center;
                         border: 1px solid #eee; }}
-        .metric-card.positive {{ border-left: 3px solid #2ca02c; }}
-        .metric-card.negative {{ border-left: 3px solid #d62728; }}
-        .metric-value {{ font-size: 24px; font-weight: 700; color: #333; }}
-        .metric-card.positive .metric-value {{ color: #2ca02c; }}
-        .metric-card.negative .metric-value {{ color: #d62728; }}
-        .metric-label {{ font-size: 12px; color: #888; margin-top: 4px; }}
+        .metric-card.positive {{ border-left: 3px solid #12a05c; }}
+        .metric-card.negative {{ border-left: 3px solid #ff6768; }}
+        .metric-value {{ font-size: 24px; font-weight: 700; color: var(--text); }}
+        .metric-card.positive .metric-value {{ color: #12a05c; }}
+        .metric-card.negative .metric-value {{ color: #ff6768; }}
+        .metric-label {{ font-size: 12px; color: var(--text-muted); margin-top: 4px; }}
         .signal-tag {{ display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
                        margin-left: 6px; }}
-        .signal-bullish {{ background: #e8f5e9; color: #2e7d32; }}
-        .signal-bearish {{ background: #ffebee; color: #c62828; }}
-        .signal-neutral {{ background: #f5f5f5; color: #666; }}
-        .analysis-hint {{ color: #888; font-size: 13px; font-style: italic; margin-bottom: 12px; }}
-        .no-data {{ color: #999; text-align: center; padding: 20px; }}
+        .signal-bullish {{ background: #d1fae5; color: #10b981; }}
+        .signal-bearish {{ background: #fee2e2; color: #ff6768; }}
+        .signal-neutral {{ background: #f5f5f5; color: var(--text-muted); }}
+        .analysis-hint {{ color: var(--text-muted); font-size: 13px; font-style: italic; margin-bottom: 12px; }}
+        .no-data {{ color: var(--text-muted); text-align: center; padding: 20px; }}
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #eee; }}
-        th {{ background: #f9f9f9; font-weight: 600; color: #555; }}
+        th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #f3f4f6; }}
+        th {{ background: var(--bg); font-weight: 600; color: var(--text-muted); }}
+        tbody tr:hover {{ background: #f9fafb; }}
         .percentile-list {{ display: flex; flex-direction: column; gap: 12px; }}
         .percentile-item {{ display: flex; align-items: center; gap: 12px; }}
         .percentile-label {{ width: 120px; font-size: 13px; color: #555; }}
         .percentile-bar-container {{ flex: 1; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; }}
         .percentile-bar {{ height: 100%; border-radius: 10px; transition: width 0.3s; }}
-        .percentile-bar.overvalued {{ background: #d62728; }}
-        .percentile-bar.undervalued {{ background: #2ca02c; }}
-        .percentile-bar.fair {{ background: #1f77b4; }}
+        .percentile-bar.overvalued {{ background: #ff6768; }}
+        .percentile-bar.undervalued {{ background: #12a05c; }}
+        .percentile-bar.fair {{ background: #263859; }}
         .percentile-value {{ width: 120px; font-size: 13px; font-weight: 600; }}
         .level-tag {{ font-size: 11px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; }}
-        .level-tag.overvalued {{ background: #ffebee; color: #c62828; }}
-        .level-tag.undervalued {{ background: #e8f5e9; color: #2e7d32; }}
-        .level-tag.fair {{ background: #e3f2fd; color: #1565c0; }}
+        .level-tag.overvalued {{ background: #fee2e2; color: #ff6768; }}
+        .level-tag.undervalued {{ background: #d1fae5; color: #12a05c; }}
+        .level-tag.fair {{ background: #e8eaf0; color: #17223b; }}
         .band-table td:first-child {{ font-weight: 600; }}
-        .band-table .upper td:last-child {{ color: #d62728; }}
-        .band-table .lower td:last-child {{ color: #2ca02c; }}
-        .band-width {{ margin-top: 8px; font-size: 13px; color: #666; }}
+        .band-table .upper td:last-child {{ color: #ff6768; }}
+        .band-table .lower td:last-child {{ color: #12a05c; }}
+        .band-width {{ margin-top: 8px; font-size: 13px; color: var(--text-muted); }}
         .trend-list {{ display: flex; flex-direction: column; gap: 10px; }}
         .trend-item {{ display: flex; justify-content: space-between; padding: 10px 14px; background: #f9f9f9; border-radius: 6px; }}
         .trend-label {{ color: #555; }}
         .trend-value {{ font-weight: 600; }}
-        .trend-up {{ color: #d62728; }}
-        .trend-down {{ color: #2ca02c; }}
-        .flow-table .flow-in {{ color: #d62728; font-weight: 600; }}
-        .flow-table .flow-out {{ color: #2ca02c; font-weight: 600; }}
+        .trend-up {{ color: #ff6768; }}
+        .trend-down {{ color: #12a05c; }}
+        .flow-table .flow-in {{ color: #ff6768; font-weight: 600; }}
+        .flow-table .flow-out {{ color: #12a05c; font-weight: 600; }}
         .event-list {{ display: flex; flex-direction: column; gap: 10px; }}
         .event-item {{ display: flex; justify-content: space-between; padding: 10px 14px; background: #f9f9f9; border-radius: 6px; }}
-        .holder-table .holder-increase {{ color: #d62728; font-weight: 600; }}
-        .holder-table .holder-decrease {{ color: #2ca02c; font-weight: 600; }}
+        .holder-table .holder-increase {{ color: #ff6768; font-weight: 600; }}
+        .holder-table .holder-decrease {{ color: #12a05c; font-weight: 600; }}
         .risk-list {{ padding-left: 20px; }}
         .risk-list li {{ margin-bottom: 8px; color: #555; }}
-        .footer {{ text-align: center; margin-top: 40px; font-size: 12px; color: #aaa; }}
+        @media (max-width: 1024px) {{
+            body {{ padding: 16px; }}
+            .metrics-grid {{ grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }}
+            .header {{ padding: 24px; }}
+            .header h1 {{ font-size: 22px; }}
+        }}
+        @media (max-width: 640px) {{
+            body {{ padding: 12px; }}
+            .metrics-grid {{ grid-template-columns: 1fr 1fr; gap: 12px; }}
+            .section {{ padding: 16px; }}
+            .section h2 {{ font-size: 16px; }}
+            .header {{ padding: 20px; }}
+            .header h1 {{ font-size: 20px; }}
+            .header p {{ font-size: 12px; }}
+            table {{ font-size: 12px; }}
+            th, td {{ padding: 6px 8px; }}
+        }}
+        {nav_css}
     </style>
 </head>
 <body>
+{nav_html}
+
 <div class="header">
     <h1>{template_name} — {stock_name}({stock_code})</h1>
     <p>数据日期: {data_date} | 当前价: {current_price:.2f} | 生成时间: {now}</p>
@@ -572,6 +650,6 @@ class ReportTemplateEngine:
 {deep_html}
 {risk_html}
 
-<div class="footer">Generated by jingni-trader 投资分析系统</div>
+{footer_html}
 </body>
 </html>'''

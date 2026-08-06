@@ -43,9 +43,10 @@ engine = BacktestEngine()
 }
 ```
 
-##### `generate_report(result, output_dir) -> str`
-
-生成HTML回测报告。
+> **报告说明**：策略回测的 HTML 绩效报告由 reports-engine 统一生成
+> （`report.html`，含净值曲线/回撤/月度热力图/滚动收益/水下曲线/绩效指标等）。
+> backtest-engine 不再生成 quantstats 第三方样式的 `backtest_report_*.html`，
+> 因此不再提供 `generate_report()` 方法。
 
 ## 标准入口函数
 

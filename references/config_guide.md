@@ -18,9 +18,9 @@
 | 变量名 | 描述 | 可选值 | 默认值 |
 |--------|------|--------|--------|
 | DATA_BACKEND | 数据源后端 | tushare/baostock/akshare/xtquant/gm | "tushare" |
-| BACKTEST_BACKEND | 回测框架 | rqalpha/backtrader/gm | "rqalpha" |
+| BACKTEST_BACKEND | 回测框架 | native/rqalpha/backtrader/gm | "native" |
 | TRADE_BACKEND | 交易接口 | xtquant/gm | "xtquant" |
-| FACTOR_BACKEND | 因子计算库（技术指标） | talib/pandas_ta | "talib" |
+| FACTOR_BACKEND | 因子计算库（技术指标） | talib/pandas_ta | "pandas_ta" |
 | QUANT_FACTOR_BACKEND | DataFrame 后端（IC/中性化/相关性热路径） | pandas/polars/auto | "pandas" |
 | QUANT_ALPHALENS_REPORT | 是否生成 Alphalens 因子分析报告 | 0/1 | "0" |
 | QUANT_LEGACY_PIPELINE | 强制走旧 4 步硬编码因子处理路径（兼容回滚） | 0/1 | "0" |
