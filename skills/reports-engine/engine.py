@@ -21,12 +21,30 @@ from scripts.config import (
     REPORT_DIR, REPORT_TITLE,
     INDUSTRY_STANDARD, BENCHMARK, RISK_FREE_RATE,
     INCLUDE_HEATMAP,
-    INCLUDE_ATTRIBUTION, CHART_THEME
+    INCLUDE_ATTRIBUTION, CHART_THEME, ENABLE_PLUGIN
 )
 from scripts.templates.common_components import (
     build_page_css, build_nav_bar_css, build_nav_bar_html, build_footer_html,
     render_page,
 )
+
+# 报告插件框架（懒加载避免循环依赖）
+_PLUGIN_LOADED = False
+
+
+def _ensure_plugins_loaded() -> None:
+    """确保插件已扫描注册（懒加载，仅一次）。"""
+    global _PLUGIN_LOADED
+    if _PLUGIN_LOADED:
+        return
+    try:
+        from plugins.loader import scan as _plugin_scan
+        plugins_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plugins")
+        _plugin_scan(plugins_dir)
+        _PLUGIN_LOADED = True
+    except Exception as e:  # 插件框架异常不影响主流程
+        logger.warning(f"报告插件加载异常（已跳过）: {e}")
+
 
 logger = logging.getLogger("reports-engine")
 
@@ -801,6 +819,97 @@ def _maybe_render_factor_analysis_report(ctx) -> str:
     except Exception as e:
         logger.warning(f"因子分析汇总报告生成失败: {e}")
         return ""
+
+
+def _collect_plugin_data(ctx, requires: List[str]) -> Dict[str, Any]:
+    """按插件 requires 声明收集产物数据。
+
+    支持的产物：
+      - DATA:     行情数据 DataFrame（读 parquet）
+      - FACTOR:   因子数据 DataFrame（读 parquet）
+      - BACKTEST: 回测产物（返回 backtest_result.json 解析后的 dict + equity_curve）
+      其余未知产物：返回其 artifact 路径字符串（由插件自行读取）。
+    """
+    import pandas as _pd
+
+    data: Dict[str, Any] = {}
+    for key in requires:
+        if not hasattr(ctx, "get_artifact"):
+            continue
+        path = ctx.get_artifact(key)
+        if not path:
+            continue
+        try:
+            if key in ("DATA", "FACTOR"):
+                data[key] = _pd.read_parquet(path) if os.path.exists(path) else None
+            elif key == "BACKTEST":
+                # 回测目录：返回 dir 路径 + 净值曲线
+                bt = {"dir": os.path.dirname(path) if os.path.exists(path) else ""}
+                eq_path = os.path.join(os.path.dirname(path), "equity_curve.parquet")
+                bt["equity_curve"] = _pd.read_parquet(eq_path) if os.path.exists(eq_path) else None
+                data[key] = bt
+            else:
+                data[key] = path
+        except Exception as e:
+            logger.warning(f"插件产物[{key}]收集失败: {e}")
+            data[key] = None
+    return data
+
+
+def _run_plugin(ctx, plugin) -> Dict[str, Any]:
+    """运行报告插件：收集产物 → 调 render → 写文件 → 注册门户。
+
+    参数:
+        ctx:    Context 对象
+        plugin: ReportPlugin（已由 loader 注册，含 render 函数）
+    返回:
+        与其它 _run_*_report 一致的结果 dict {success, artifact_path, ...}
+    """
+    if plugin.render is None:
+        return {"success": False, "error": f"插件[{plugin.id}]无 render 函数"}
+
+    try:
+        # 收集产物数据
+        data = _collect_plugin_data(ctx, plugin.requires)
+
+        # 输出路径：<QUANT_WORK_DIR>/reports/<plugin_id>.html
+        _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+        out_dir = os.path.join(_work_dir, "reports")
+        os.makedirs(out_dir, exist_ok=True)
+        output_path = os.path.join(out_dir, f"{plugin.id}.html")
+
+        # 调用插件 render
+        html = plugin.render(data, ctx, output_path)
+
+        if not html or not os.path.exists(output_path):
+            # render 未写文件则框架代写
+            if html:
+                with open(output_path, "w", encoding="utf-8") as f:
+                    f.write(html)
+            else:
+                return {"success": False, "error": f"插件[{plugin.id}]未返回 HTML"}
+
+        # 注册门户
+        try:
+            _update_report_portal(
+                output_path,
+                report_type=plugin.id,
+                title=f"{plugin.label}报告",
+                task_id=ctx.task_id if hasattr(ctx, "task_id") else "",
+            )
+        except Exception as e:
+            logger.warning(f"插件[{plugin.id}]门户注册失败: {e}")
+
+        logger.info(f"插件[{plugin.id}]报告已生成: {output_path}")
+        return {
+            "success": True,
+            "artifact_path": output_path,
+            "metadata": {"plugin_id": plugin.id, "report_type": plugin.id},
+            "error": "",
+        }
+    except Exception as e:
+        logger.error(f"插件[{plugin.id}]运行异常: {e}")
+        return {"success": False, "error": str(e)}
 
 
 def _run_template_report(ctx) -> Dict[str, Any]:
@@ -1797,12 +1906,25 @@ def run(ctx) -> Dict[str, Any]:
         logger.info("检测到执行监控意图，生成执行监控报告")
         return _run_execution_report(ctx)
 
-    # 优先级 4: 有 BACKTEST 产物 → 回测绩效报告
+    # 优先级 4: 报告插件匹配（通过 plugin.yaml 的 trigger）
+    if ENABLE_PLUGIN:
+        try:
+            _ensure_plugins_loaded()
+            from plugins.registry import find_by_trigger as _plugin_find
+            matched = _plugin_find(ctx)
+            if matched:
+                plugin = matched[0]
+                logger.info(f"命中报告插件: [{plugin.id}] {plugin.label}")
+                return _run_plugin(ctx, plugin)
+        except Exception as e:
+            logger.warning(f"报告插件匹配异常（已回退到内置报告）: {e}")
+
+    # 优先级 5: 有 BACKTEST 产物 → 回测绩效报告
     backtest_path = ctx.get_artifact("BACKTEST") if hasattr(ctx, 'get_artifact') else None
     has_backtest = backtest_path and os.path.exists(backtest_path)
 
     if not has_backtest:
-        # 优先级 5: 默认 → 模板化个股分析报告
+        # 优先级 6: 默认 → 模板化个股分析报告
         return _run_template_report(ctx)
 
     try:

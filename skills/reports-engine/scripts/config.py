@@ -13,6 +13,8 @@ RISK_FREE_RATE = float(os.environ.get("RISK_FREE_RATE", 0.03))
 INCLUDE_HEATMAP = os.environ.get("INCLUDE_HEATMAP", "true").lower() == "true"
 INCLUDE_ATTRIBUTION = os.environ.get("INCLUDE_ATTRIBUTION", "true").lower() == "true"
 CHART_THEME = os.environ.get("CHART_THEME", "plotly_white")
+# 报告插件机制开关（true 时启用 plugins/ 目录下的报告插件）
+ENABLE_PLUGIN = os.environ.get("ENABLE_PLUGIN", "true").lower() == "true"
 
 # LIVE 模式实时状态服务（仅 TRADE_MODE=live 时激活）
 # 轮询间隔（秒），前端 setInterval 据此刷新

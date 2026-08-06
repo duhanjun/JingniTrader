@@ -278,9 +278,11 @@ def render_page(template_name: str, **context) -> str:
     """用 base 体系渲染一个报告模板。
 
     参数:
-        template_name: 模板文件名（如 backtest.html.j2），相对 templates 目录。
+        template_name: 模板文件名（如 backtest.html.j2 / capital_flow_report.html.j2）。
         **context: 模板上下文。自动注入 base_css / logo_svg / nav_title /
                    disclaimer 等 base 模板所需的公共变量（调用方可覆盖）。
+                   可选参数 extra_template_dirs（list[str]）：额外模板搜索目录
+                   （报告插件模板所在目录），用于加载插件自身的 .j2 模板。
     返回:
         渲染后的完整 HTML 页面字符串。
 
@@ -289,7 +291,13 @@ def render_page(template_name: str, **context) -> str:
         - 图表 HTML（plotly）等已是渲染后的 HTML，需用 | safe 过滤器传入，
           或在调用方以已安全片段形式注入。
     """
-    env = _get_jinja_env()
+    extra_dirs = context.pop("extra_template_dirs", None)
+    if extra_dirs:
+        # 报告插件：额外搜索插件模板目录（与 templates 目录合并），
+        # 使插件模板可 {% extends "base.html.j2" %}
+        env = _build_env(extra_dirs)
+    else:
+        env = _get_jinja_env()
     if env is None:
         raise RuntimeError("jinja2 未安装，无法使用 base.html.j2 模板渲染")
 
@@ -308,3 +316,20 @@ def render_page(template_name: str, **context) -> str:
 
     tmpl = env.get_template(template_name)
     return tmpl.render(**base_ctx)
+
+
+def _build_env(extra_dirs) -> "Environment":
+    """构建合并模板搜索路径的 Jinja2 Environment（templates + extra_dirs）。"""
+    try:
+        from jinja2 import Environment, FileSystemLoader, select_autoescape
+    except Exception as e:
+        logger.warning(f"jinja2 未安装: {e}")
+        return None
+    search_paths = [_TEMPLATES_DIR] + list(extra_dirs)
+    return Environment(
+        loader=FileSystemLoader(search_paths),
+        autoescape=select_autoescape(default_for_string=False, default=False),
+        trim_blocks=True,
+        lstrip_blocks=True,
+        keep_trailing_newline=True,
+    )

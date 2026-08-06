@@ -1,0 +1,24 @@
+# 技术分析报告 — 内置报告插件化迁移示范
+id: technical_report
+label: 技术分析
+icon: "📈"
+version: "1.0.0"
+enabled: true
+
+# 触发条件：仅当明确请求技术分析报告时（report_intent=technical）
+# 其余场景（fundamental/both/兜底）仍由内置 _run_template_report 处理，并行兼容。
+trigger:
+  - { field: report_intent, equals: technical }
+
+# 所需产物：DATA 行情数据
+requires:
+  - DATA
+
+# 数据契约
+data_contract:
+  strict: false
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 10
