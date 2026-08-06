@@ -42,3 +42,6 @@ CODEBUDDY.md
 # 不在 jingni-trader 仓库中重复跟踪，保持两个仓库完全独立
 skills/jingni-datafeed/
 
+# docs 为本地设计/需求文档目录（非运行代码，不纳入版本库）
+docs/
+

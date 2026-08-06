@@ -135,6 +135,40 @@ jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 - **fundamental**: 仅生成基本面深度分析报告（含A股特色：股东结构）
 - **both**: 同时生成技术面与基本面两份报告（默认）
 
+### 报告插件机制（可扩展报告类型）
+
+reports-engine 支持**报告插件**，新增报告 = 新增一个插件文件夹，无需改主引擎代码。
+
+**插件位置**：`skills/reports-engine/plugins/<插件id>/`，含 3 个文件：
+- `plugin.yaml`：报告声明（`trigger` 触发条件 + `requires` 所需产物 + `label`/`icon` 门户元信息）
+- `render.py`：渲染器，实现 `render(data, ctx, output_path)` 生成 HTML
+- `<报告id>.html.j2`：HTML 模板（继承 `base.html.j2` 复用统一骨架）
+
+**触发机制**：`reports-engine.run()` 在 REPORT 阶段执行，路由优先级为：
+1. 归因（`report_intent=attribution`）→ 2. 组合（`report_intent=portfolio`）→ 3. 执行（`report_intent=execution`）
+4. **报告插件匹配**（`find_by_trigger`，按 plugin.yaml 的 trigger 匹配）→ 5. 回测产物 → 6. 模板化个股分析
+
+**插件触发条件**支持三种方式（plugin.yaml 的 `trigger`）：
+- 关键词识别：`{ keyword: ["资金流", "主力资金"] }` —— 用户输入含这些词即触发
+- 字段精确匹配：`{ field: report_intent, equals: technical }`
+- 产物存在性：`{ artifact: BACKTEST }`
+
+**示例**：内置 `capital_flow_report` 插件通过关键词"资金流/主力资金"触发。用户说"分析 002594.SZ 的资金流"，REPORT 阶段命中该插件，生成 `capital_flow_report.html` 资金流报告。
+
+**现有插件清单**（`plugins/` 目录）：
+| 插件 id | 触发方式 | 说明 |
+|---|---|---|
+| `technical_report` | `report_intent=technical` | 技术分析报告（通过插件触发） |
+| `fundamental_report` | `report_intent=fundamental` | 基本面分析报告（通过插件触发） |
+| `capital_flow_report` | 关键词"资金流/主力资金" | 资金流分析报告（示例插件） |
+| `attribution_report` | 插件注册 | 绩效归因（走内置路由） |
+| `portfolio_report` | 插件注册 | 组合优化（走内置路由） |
+| `execution_report` | 插件注册 | 执行监控（走内置路由） |
+| `backtest_report` | 插件注册 | 策略回测（走内置路由） |
+| `factor_analysis_report` | 插件注册 | 因子分析（附加产物） |
+
+**开发新报告**：复制任一插件文件夹 → 改 `plugin.yaml`（触发词/所需产物）+ `render.py` + 模板 → 放入 `plugins/` 下即可被自动扫描注册。详见 `docs/产品需求文档_报告插件化机制.md`。
+
 ### LLM 动态 Prompt 生成
 
 reports-engine 的 llm_analyst 模块根据模板配置文件（`technical.yaml` / `fundamental.yaml`）中的 `factor_groups` 动态生成 LLM 系统提示词：
