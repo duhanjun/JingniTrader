@@ -1,0 +1,44 @@
+# jingni-trader 本地 pre-commit 门禁
+#
+# 目标：提交前拦截明显问题（语法错误 / 关键契约测试子集 / 简单风格），
+# 不引入重型依赖，可在无网络环境下运行。
+#
+# 安装：pip install pre-commit && pre-commit install
+# 手动全跑：pre-commit run --all-files
+#
+# 说明：
+# - 轻量优先：用 python 内置 compileall 做语法检查，避免依赖 ruff/flake8 是否安装
+# - 关键测试子集：仅跑主调度器 schema 契约 + FSM 转移 + 组合引擎降级链等核心回归，
+#   避免全流程（含重型原生计算）拖慢提交。完整回归交给 CI。
+repos:
+  - repo: local
+    hooks:
+      - id: python-syntax-check
+        name: Python 语法检查（compileall）
+        entry: python -m compileall -q
+        language: system
+        types: [python]
+        exclude: >-
+          (?x)^(
+            __pycache__/.*|
+            .*\.egg-info/.*|
+            .pytest_cache/.*|
+            _diag_ws/.*|
+            _e2e_workdir/.*|
+            _gm_degrade_ws/.*|
+            _live_xtquant_ws/.*|
+            _reports_e2e/.*|
+            workspace/.*|
+            audit/.*|
+            assets/.*|
+            references/.*
+          )$
+
+      - id: key-test-subset
+        name: 关键契约测试子集（本地门禁，不跑重型计算）
+        entry: python -m pytest tests/master/test_schemas.py tests/master/test_fsm.py tests/portfolio_risk_engine/test_estimate_covariance_fallback.py -p no:cacheprovider -q
+        language: system
+        pass_filenames: false
+        always_run: true
+        # 仅在涉及 Python 源/测试变更时触发语义检查
+        files: ^(scripts/|skills/|tests/|engine\.py).*\.py$

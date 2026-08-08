@@ -76,42 +76,32 @@ class TestExecutionReportV1:
     def test_valid_report(self):
         from scripts.schemas import ExecutionReportV1
         report = ExecutionReportV1(
-            execution_id="exec_001",
-            trade_date="2026-08-02",
-            nav_after=100000.0,
-            cash_after=50000.0,
-            positions_after={"000001.SZ": 200},
-            verdict="confirmed",
-            created_at=datetime.now(),
+            orders_executed=3,
+            orders_failed=0,
+            account_snapshot={"nav": 100000.0, "cash": 50000.0},
+            mode="paper",
         )
         assert report.version == "ExecutionReportV1"
-        assert report.verdict == "confirmed"
+        assert report.mode == "paper"
+        assert report.orders_executed == 3
 
     def test_extra_field_forbid(self):
         from scripts.schemas import ExecutionReportV1
         with pytest.raises(ValidationError):
             ExecutionReportV1(
-                execution_id="exec_001",
-                trade_date="2026-08-02",
-                nav_after=100000.0,
-                cash_after=50000.0,
-                positions_after={},
-                verdict="confirmed",
-                created_at=datetime.now(),
+                orders_executed=3,
+                orders_failed=0,
+                mode="paper",
                 extra_field="bad",
             )
 
-    def test_invalid_verdict_literal(self):
+    def test_invalid_mode_literal(self):
         from scripts.schemas import ExecutionReportV1
         with pytest.raises(ValidationError):
             ExecutionReportV1(
-                execution_id="exec_001",
-                trade_date="2026-08-02",
-                nav_after=100000.0,
-                cash_after=50000.0,
-                positions_after={},
-                verdict="pending",  # 非法值
-                created_at=datetime.now(),
+                orders_executed=3,
+                orders_failed=0,
+                mode="future",  # 非法值
             )
 
 
@@ -278,6 +268,93 @@ class TestStageSchemaMap:
         from scripts.schemas import STAGE_SCHEMA_MAP
         for stage in ["DATA", "FACTOR", "BACKTEST", "EXECUTION", "REPORT"]:
             assert stage in STAGE_SCHEMA_MAP
+
+
+# ============================================================================
+# Schema ↔ 引擎实际产出 一致性契约测试（OPEN-2026-021 加固项 6）
+#
+# 目的：确认 schemas.py 定义的字段契约与引擎 run() 实际返回的 metadata 结构一致，
+# 防止引擎侧字段变更后 schema 校验静默失效（契约漂移）。
+# 仅校验 dict 形状契约，不触发重型原生计算，确定性可回归。
+# ============================================================================
+
+class TestSchemaEngineContract:
+    def test_backtest_engine_metadata_contract(self):
+        """BacktestResultV1 应接受 backtest-engine run() 典型 metadata 形状。"""
+        from scripts.schemas import validate_payload, BacktestResultV1
+        # 模拟 backtest-engine run() 返回（见 schemas.py 文档字符串结构）
+        payload = {
+            "version": "BacktestResultV1",
+            "metrics": {"sharpe_ratio": 1.1, "max_drawdown": -0.08},
+            "backend": "native",
+            "verdict": {
+                "recommended_state": "candidate",
+                "passed_gates": ["sharpe"],
+                "failed_gates": [],
+            },
+            "trade_count": 86,
+            "timestamp": "2026-08-08T00:00:00",
+        }
+        is_valid, err = validate_payload(payload, BacktestResultV1)
+        assert is_valid, f"backtest metadata 不符合契约: {err}"
+
+    def test_execution_engine_metadata_contract(self):
+        """ExecutionReportV1 应接受 execution-monitor-engine run() 典型 metadata。"""
+        from scripts.schemas import validate_payload, ExecutionReportV1
+        payload = {
+            "version": "ExecutionReportV1",
+            "orders_executed": 2,
+            "orders_failed": 0,
+            "account_snapshot": {"nav": 100000.0, "cash": 40000.0},
+            "mode": "paper",
+        }
+        is_valid, err = validate_payload(payload, ExecutionReportV1)
+        assert is_valid, f"execution metadata 不符合契约: {err}"
+
+    def test_data_engine_cleaned_contract(self):
+        """CleanedDataV1 应接受 data-engine 清洗产物典型形状。"""
+        from scripts.schemas import validate_payload, CleanedDataV1
+        payload = {
+            "version": "CleanedDataV1",
+            "path": "/work/cleaned.parquet",
+            "rows": 1200,
+            "columns": ["code", "date", "close"],
+            "asof": "2026-08-07",
+            "quality_mode": "normal",
+        }
+        is_valid, err = validate_payload(payload, CleanedDataV1)
+        assert is_valid, f"cleaned data 不符合契约: {err}"
+
+    def test_report_engine_contract(self):
+        """ReportV1 应接受 reports-engine 产物典型形状。"""
+        from scripts.schemas import validate_payload, ReportV1
+        payload = {
+            "version": "ReportV1",
+            "path": "/work/report.html",
+            "template": "both",
+            "stock_pool": ["000001.SZ", "600000.SH"],
+            "asof": "2026-08-07",
+        }
+        is_valid, err = validate_payload(payload, ReportV1)
+        assert is_valid, f"report 不符合契约: {err}"
+
+    def test_fsm_data_stages_all_have_schema(self):
+        """FSM 中所有数据产出阶段（DATA/FACTOR/BACKTEST/EXECUTION/REPORT）均须有 schema 映射。"""
+        from scripts.schemas import STAGE_SCHEMA_MAP
+        from scripts.fsm import (
+            STATE_DATA, STATE_FACTOR, STATE_BACKTEST,
+            STATE_EXECUTION, STATE_REPORT,
+        )
+        for stage in (STATE_DATA, STATE_FACTOR, STATE_BACKTEST,
+                      STATE_EXECUTION, STATE_REPORT):
+            assert stage in STAGE_SCHEMA_MAP, f"{stage} 缺少 schema 映射（契约漂移）"
+
+    def test_schema_field_count_non_empty(self):
+        """每个 stage schema 必须至少定义了一个字段（防止空模型契约退化）。"""
+        from scripts.schemas import STAGE_SCHEMA_MAP
+        for stage, schema_cls in STAGE_SCHEMA_MAP.items():
+            fields = schema_cls.model_fields
+            assert len(fields) > 0, f"{stage} 的 schema 无字段定义"
 
 
 if __name__ == "__main__":

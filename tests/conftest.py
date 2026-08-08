@@ -35,6 +35,15 @@ from unittest import mock
 
 import pytest
 
+# 环境级线程/进度护栏：收敛原生扩展（cvxpy/scipy/openblas）的并行线程数到 1，
+# 降低 Windows 下原生栈线程竞态引发的 `Windows fatal exception: access violation`
+# 概率（OPEN-2026-017 残余根因的长期缓解项，配合 requirements 中 cvxpy 版本 pin）。
+# 同时禁用 tqdm 监控线程（该线程出现在 access violation 栈顶），进一步降低竞态面。
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)

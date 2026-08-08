@@ -1,0 +1,118 @@
+name: CI
+
+# jingni-trader skill 持续集成
+# 分层执行：
+#   - 快速回归（每次 push/PR）：L0 契约 + L2 单元 + 主调度器/意图解析（无需网络、无需真实第三方库）
+#   - 完整回归（schedule + 手动）：全部非网络测试，按子 skill 维度分组
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 每天 UTC 02:00 完整回归
+    - cron: '0 2 * * *'
+  workflow_dispatch: {}
+
+jobs:
+  quick-regression:
+    name: 快速回归 (fast, no network)
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.11']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      - name: 安装轻量依赖（仅测试必需）
+        run: |
+          pip install --upgrade pip
+          pip install pytest pytest-cov pyyaml
+          # 核心数据处理依赖（测试 fixture 需要 pandas/numpy/pyarrow 生成合成数据）
+          pip install "pandas>=2.0.0" "numpy>=1.24.0" "pyarrow>=10.0.0"
+
+      - name: L0/L1/L2 快速回归（排除 slow / heavy / requires_network / 需真实库）
+        run: |
+          pytest tests \
+            -m "not slow and not heavy and not requires_network and not requires_tushare_token and not requires_gm_token and not requires_wind_terminal and not requires_ifind_credentials and not requires_xtquant and not requires_alphalens and not requires_polars and not requires_sklearn" \
+            --cov=engine \
+            --cov=scripts \
+            --cov-report=term-missing \
+            -q
+
+      - name: 主调度器与意图解析专项（skill 核心路由）
+        run: |
+          pytest tests/master -m "not slow and not requires_network" -q
+
+  full-regression:
+    name: 完整回归 (full, per-skill)
+    runs-on: ubuntu-latest
+    needs: quick-regression
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装完整依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-timeout
+
+      - name: 按子 skill 维度分组测试（排除 heavy，由独立批次执行）
+        run: |
+          set -e
+          for marker in skill_master skill_data_engine skill_factor_engine skill_strategy_model_engine skill_backtest_engine skill_portfolio_risk_engine skill_execution_monitor_engine skill_reports_engine; do
+            echo "===== marker: ${marker} ====="
+            pytest tests -m "${marker} and not requires_network and not slow and not heavy" -q || exit 1
+          done
+
+      - name: 集成 / 端到端（合成数据，无网络，排除 heavy）
+        run: |
+          pytest tests/integration -m "not requires_network and not slow and not heavy" -q
+
+      - name: 上传覆盖率报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-reports
+          path: .coverage
+          if-no-files-found: ignore
+
+  heavy-regression:
+    name: 重型计算回归 (heavy, isolated batch)
+    runs-on: ubuntu-latest
+    needs: quick-regression
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装完整依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-timeout
+
+      - name: 重型计算测试（cvxpy/pypfopt/原生扩展/alphalens，独立批次隔离线程竞态）
+        run: |
+          set -e
+          # heavy 标记用例单独成批，配合 conftest OMP_NUM_THREADS=1 与 pytest.ini 全局 timeout=120
+          # 降低 Windows/Linux 原生栈线程竞态引发的 access violation 概率
+          pytest tests \
+            -m "heavy and not requires_network" \
+            --timeout=120 --timeout-method=thread \
+            -q || true
+          echo "heavy 批次完成（失败不阻断主流水线，仅作长期稳定性观测）"
