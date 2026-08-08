@@ -80,7 +80,11 @@ def _build_allowed_transitions() -> Dict[str, List[str]]:
         ])
 
     # DEGRADED（非终态）可恢复
+    # 业务意图：阶段失败转入 DEGRADED 后，允许继续向后执行（带降级标记），
+    # 而非强制终止。典型场景：PORTFOLIO 失败 → DEGRADED → 仍可进入 EXECUTION
+    # 完成后续阶段并产出报告（OPEN-2026-020 修复：原出边缺 EXECUTION 导致级联红灯）。
     transitions[STATE_DEGRADED] = [
+        STATE_EXECUTION,   # 降级后继续向后执行（带降级标记，不阻断后续阶段）
         STATE_REPORT,      # 跳过失败阶段直接报告
         STATE_FAILED,      # 无法恢复 → 失败
         STATE_DATA,        # 恢复到前置阶段重试

@@ -118,3 +118,81 @@ def test_valid_data_runs_ledoit_wolf(optimizer):
     assert cov.shape == (5, 5)
     assert np.allclose(cov.values, cov.values.T, atol=1e-8)
     assert np.all(np.isfinite(cov.values))
+
+
+def _make_fake_ef(max_sharpe_raises=True, min_vol_raises=False, weights=None):
+    """构造一个可替换真实 EfficientFrontier 的桩类。
+
+    用桩而非真实求解器，使降级链测试与 cvxpy/pypfopt 实际可用性解耦，
+    稳定验证「max_sharpe 不可行 → min_variance → 等权」的控制流分支。
+    """
+    cols = [f"A{i}" for i in range(5)]
+    w = weights if weights is not None else {c: 1.0 / 5 for c in cols}
+
+    class _FakeEF:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def max_sharpe(self, *args, **kwargs):
+            if max_sharpe_raises:
+                raise Exception("Solver status: infeasible")
+            return None
+
+        def min_volatility(self, *args, **kwargs):
+            if min_vol_raises:
+                raise Exception("infeasible too")
+            return None
+
+        def clean_weights(self):
+            return dict(w)
+
+        def portfolio_performance(self, *args, **kwargs):
+            return (0.1, 0.2, 1.0)
+
+    return _FakeEF
+
+
+def test_optimize_max_sharpe_infeasible_falls_back_to_min_variance(optimizer):
+    """OPEN-2026-019：max_sharpe infeasible 时应降级 min_variance 而非抛错。
+
+    用桩类替换真实求解器，模拟 max_sharpe 不可行，验证降级链产出可用权重
+    （method=min_variance_fallback，不击穿上层流程）。
+    """
+    import sys
+    from unittest import mock
+
+    mod = sys.modules["portfolio_risk_engine_engine_cov"]
+
+    df = _valid_returns()
+    cov = df.cov()
+    exp = df.mean() * 252
+    exp = exp.reindex(cov.columns).fillna(0.0)
+
+    fake = _make_fake_ef(max_sharpe_raises=True, min_vol_raises=False)
+    with mock.patch.object(mod, "EfficientFrontier", fake):
+        weights, meta = optimizer.optimize(exp, cov, method="max_sharpe")
+    assert isinstance(weights, pd.Series)
+    assert len(weights) == 5
+    assert abs(weights.sum() - 1.0) < 1e-6  # 近似归一
+    assert meta.get("method") == "min_variance_fallback"
+
+
+def test_optimize_all_methods_fail_falls_back_to_equal_weight(optimizer):
+    """OPEN-2026-019：max_sharpe 与 min_variance 均失败时应兜底等权。"""
+    import sys
+    from unittest import mock
+
+    mod = sys.modules["portfolio_risk_engine_engine_cov"]
+
+    df = _valid_returns()
+    cov = df.cov()
+    exp = df.mean() * 252
+    exp = exp.reindex(cov.columns).fillna(0.0)
+
+    fake = _make_fake_ef(max_sharpe_raises=True, min_vol_raises=True)
+    with mock.patch.object(mod, "EfficientFrontier", fake):
+        weights, meta = optimizer.optimize(exp, cov, method="max_sharpe")
+    assert isinstance(weights, pd.Series)
+    assert len(weights) == 5
+    assert abs(weights.sum() - 1.0) < 1e-6  # 等权归一
+    assert meta.get("method") == "equal_weight"

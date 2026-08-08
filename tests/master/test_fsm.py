@@ -59,6 +59,37 @@ class TestDailyFSMLegalTransitions:
         current = fsm.transition(current, "FACTOR")  # 回到 FACTOR 重试
         assert current == "FACTOR"
 
+    def test_degraded_to_execution_allowed(self):
+        """OPEN-2026-020：DEGRADED → EXECUTION 合法（降级后继续向后执行）。
+
+        PORTFOLIO 失败转 DEGRADED 后，管道仍需进入 EXECUTION 完成后续阶段，
+        原出边缺失 EXECUTION 会触发非法转移并放大级联红灯。
+        """
+        from scripts.fsm import DailyFSM
+        fsm = DailyFSM()
+        current = fsm.transition("INITIALIZED", "DATA")
+        current = fsm.transition(current, "FACTOR")
+        current = fsm.transition(current, "PORTFOLIO")
+        current = fsm.transition(current, "DEGRADED")
+        current = fsm.transition(current, "EXECUTION")  # 降级继续向后
+        assert current == "EXECUTION"
+        # 之后仍可正常进入 REPORT 终态
+        current = fsm.transition(current, "REPORT")
+        assert current == "REPORT"
+        assert fsm.is_terminal()
+
+    def test_portfolio_failed_to_degraded_then_execution_pipeline(self):
+        """OPEN-2026-020 端到端：PORTFOLIO→DEGRADED→EXECUTION→REPORT 全链合法。"""
+        from scripts.fsm import DailyFSM
+        fsm = DailyFSM()
+        current = "INITIALIZED"
+        for stage in ["DATA", "FACTOR", "BACKTEST", "PORTFOLIO"]:
+            current = fsm.transition(current, stage)
+        current = fsm.transition(current, "DEGRADED")  # PORTFOLIO 失败
+        current = fsm.transition(current, "EXECUTION")
+        current = fsm.transition(current, "REPORT")
+        assert current == "REPORT"
+
 
 # ============================================================================
 # DailyFSM 非法转移

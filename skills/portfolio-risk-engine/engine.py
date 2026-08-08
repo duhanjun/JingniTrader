@@ -208,25 +208,60 @@ class PortfolioOptimizer:
             )
 
         # 标准均值-方差优化
-        ef = EfficientFrontier(expected_rets, cov_matrix, weight_bounds=(min_weight, max_weight))
+        # max_sharpe 在合成/非理想输入下可能 infeasible（约束无可行解），
+        # 抛 pypfopt.exceptions.OptimizationError。这里做降级链：
+        # max_sharpe → min_variance → 等权，确保始终产出可用权重，不击穿上层流程。
+        # 根因之一：单股上限 MAX_SINGLE_STOCK_WEIGHT 过严（如 0.10）且资产数少时，
+        # max_weight * n_assets < 1 无可行解。构造前先放宽上界到至少 1/n_assets。
+        n_assets = len(expected_rets)
+        eff_max_weight = max_weight
+        if n_assets > 0 and eff_max_weight * n_assets < 1.0 - 1e-6:
+            eff_max_weight = 1.0 / n_assets
+            logger.warning(
+                "权重上界过严(max=%.3f, 资产数=%d)导致无可行解，放宽到 %.3f",
+                max_weight, n_assets, eff_max_weight,
+            )
+        try:
+            ef = EfficientFrontier(expected_rets, cov_matrix, weight_bounds=(min_weight, eff_max_weight))
+        except Exception as e:
+            logger.warning("EfficientFrontier 构造失败，降级等权: %s", e)
+            return self._equal_weight(expected_rets.index), {
+                "method": "equal_weight", "note": "EF 构造失败", "error": str(e),
+            }
 
-        if method == "max_sharpe":
-            weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
-        elif method == "min_variance":
-            weights = ef.min_volatility()
-        elif method == "max_return":
-            weights = ef.max_quadratic_utility()
-        else:
-            weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
-
-        cleaned = ef.clean_weights()
-        perf = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE)
-
-        return pd.Series(cleaned), {
-            "expected_return": float(perf[0]),
-            "volatility": float(perf[1]),
-            "sharpe_ratio": float(perf[2]),
-        }
+        try:
+            if method == "max_sharpe":
+                weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
+            elif method == "min_variance":
+                weights = ef.min_volatility()
+            elif method == "max_return":
+                weights = ef.max_quadratic_utility()
+            else:
+                weights = ef.max_sharpe(risk_free_rate=RISK_FREE_RATE)
+            cleaned = ef.clean_weights()
+            perf = ef.portfolio_performance(risk_free_rate=RISK_FREE_RATE)
+            return pd.Series(cleaned), {
+                "expected_return": float(perf[0]),
+                "volatility": float(perf[1]),
+                "sharpe_ratio": float(perf[2]),
+            }
+        except Exception as e:
+            # 首选方法失败（如 max_sharpe infeasible）：降级 min_variance
+            logger.warning("组合优化(%s)失败，降级 min_variance: %s", method, e)
+            try:
+                weights = ef.min_volatility()
+                cleaned = ef.clean_weights()
+                return pd.Series(cleaned), {
+                    "method": "min_variance_fallback", "note": f"首选 {method} 不可行",
+                    "error": str(e),
+                }
+            except Exception as e2:
+                # min_variance 也失败：兜底等权
+                logger.warning("min_variance 亦失败，兜底等权: %s", e2)
+                return self._equal_weight(expected_rets.index), {
+                    "method": "equal_weight", "note": "优化器全部失败",
+                    "error": str(e2),
+                }
 
     def _optimize_hrp(
         self,
