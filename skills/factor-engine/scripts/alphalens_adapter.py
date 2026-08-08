@@ -13,7 +13,7 @@ Alphalens 数据格式适配器与报告生成
 - 每个因子输出 4 PNG + 1 HTML + 1 JSON（8 必填字段）
 - 若 alphalens-reloaded 不可用，自动降级到方案 C（自研轻量分层回测）
 
-PRD：references/prd_factor_alphalens_integration.md
+PRD：docs/prd_factor_alphalens_integration.md
 """
 from __future__ import annotations
 
@@ -28,6 +28,53 @@ import numpy as np
 import pandas as pd
 
 logger = logging.getLogger("alphalens_adapter")
+
+# 单因子完整报告（alphalens 原生 tear sheet 计算）的超时护栏（秒）。
+# alphalens-reloaded 在极端/合成数据上可能长时间不收敛甚至挂起，
+# 超时后降级到方案 C，避免阻塞整个 FACTOR→REPORT 流程。
+ALPHALENS_FULL_REPORT_TIMEOUT = float(os.environ.get("ALPHALENS_REPORT_TIMEOUT", "60"))
+
+
+def _run_full_report_worker(factor_data, output_dir, factor_name, result_q):
+    """子进程 worker：执行完整 alphalens 报告生成，结果通过 Queue 回传。"""
+    try:
+        paths = AlphalensAdapter.generate_full_report(factor_data, output_dir, factor_name)
+        result_q.put(("ok", paths))
+    except Exception as e:  # pragma: no cover - 子进程异常兜底
+        result_q.put(("err", repr(e)))
+
+
+def _generate_full_report_with_timeout(factor_data, output_dir, factor_name):
+    """带超时的完整 alphalens 报告生成。
+
+    返回 generate_full_report 的路径字典；超时或失败时返回 None（调用方降级方案 C）。
+    """
+    import multiprocessing as mp
+
+    ctx = mp.get_context("spawn")
+    result_q = ctx.Queue()
+    proc = ctx.Process(
+        target=_run_full_report_worker,
+        args=(factor_data, output_dir, factor_name, result_q),
+        daemon=True,
+    )
+    proc.start()
+    proc.join(timeout=ALPHALENS_FULL_REPORT_TIMEOUT)
+    if proc.is_alive():
+        proc.kill()
+        logger.warning(
+            "alphalens 完整报告生成超时（>%ss，因子 %s），降级方案 C",
+            ALPHALENS_FULL_REPORT_TIMEOUT, factor_name,
+        )
+        return None
+    if not result_q.empty():
+        status, payload = result_q.get()
+        if status == "ok":
+            return payload
+        logger.warning("alphalens 完整报告生成失败，降级方案 C: %s", payload)
+        return None
+    logger.warning("alphalens 完整报告生成无返回，降级方案 C（因子 %s）", factor_name)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -152,6 +199,7 @@ class AlphalensAdapter:
         """
         import matplotlib
         matplotlib.use("Agg")  # 无头模式，避免 Windows 显示问题
+        import matplotlib.pyplot as plt
         import alphalens as al
 
         output_dir = Path(output_dir)
@@ -168,29 +216,32 @@ class AlphalensAdapter:
         }
 
         # 4 张 PNG 分别保存
-        # alphalens 的 create_*_tear_sheet 在传入 save_fig 时使用 matplotlib savefig
+        # 兼容 alphalens-reloaded 0.4.x：tear sheet 已移除 save_fig 参数，
+        # 改为调用后捕获 matplotlib 当前 figure 再保存（每个 tear sheet 生成 1 个 figure）。
+        def _save_current_fig(target: str) -> None:
+            """保存当前 matplotlib figure 到 target，随后关闭避免残留。"""
+            fig = plt.gcf()
+            fig.savefig(target, bbox_inches="tight")
+            plt.close(fig)
+
         try:
-            al.tears.create_returns_tear_sheet(
-                factor_data, save_fig=paths["returns_png"]
-            )
+            al.tears.create_returns_tear_sheet(factor_data)
+            _save_current_fig(paths["returns_png"])
         except Exception as e:
             logger.warning(f"alphalens returns tear sheet 生成失败: {e}")
         try:
-            al.tears.create_information_tear_sheet(
-                factor_data, save_fig=paths["ic_png"]
-            )
+            al.tears.create_information_tear_sheet(factor_data)
+            _save_current_fig(paths["ic_png"])
         except Exception as e:
             logger.warning(f"alphalens information tear sheet 生成失败: {e}")
         try:
-            al.tears.create_turnover_tear_sheet(
-                factor_data, save_fig=paths["turnover_png"]
-            )
+            al.tears.create_turnover_tear_sheet(factor_data)
+            _save_current_fig(paths["turnover_png"])
         except Exception as e:
             logger.warning(f"alphalens turnover tear sheet 生成失败: {e}")
         try:
-            al.tears.create_summary_tear_sheet(
-                factor_data, save_fig=paths["summary_png"]
-            )
+            al.tears.create_summary_tear_sheet(factor_data)
+            _save_current_fig(paths["summary_png"])
         except Exception as e:
             logger.warning(f"alphalens summary tear sheet 生成失败: {e}")
 
@@ -234,12 +285,22 @@ class AlphalensAdapter:
             logger.warning(f"alphalens factor_information_coefficient 失败: {e}")
             ic_data = pd.DataFrame()
 
-        # 3. 换手率（quantile_turnover: MultiIndex date × quantile）
+        # 3. 换手率：top quantile 的平均换手率
+        # 兼容 alphalens-reloaded 0.4.x：已移除 factor_top_bottom_quantile_turnover，
+        # 改为基于 factor_quantile 列 + quantile_turnover(quantile_factor, quantile) 计算。
+        avg_turnover_top = 0.0
         try:
-            turnover_data = al.performance.factor_top_bottom_quantile_turnover(factor_data)
+            if "factor_quantile" in factor_data.columns:
+                quantile_factor = factor_data["factor_quantile"].dropna()
+                if not quantile_factor.empty:
+                    top_q = float(quantile_factor.max())
+                    turn = al.performance.quantile_turnover(quantile_factor, top_q)
+                    # turn 为 Series（index=date，Name=quantile），取均值
+                    turn = pd.Series(turn).dropna()
+                    if not turn.empty:
+                        avg_turnover_top = float(turn.mean())
         except Exception as e:
             logger.warning(f"alphalens turnover 失败: {e}")
-            turnover_data = pd.DataFrame()
 
         # ── 计算指标 ──
         # 分层收益：取最短周期列，最高分层 - 最低分层
@@ -276,15 +337,6 @@ class AlphalensAdapter:
             ic_mean = float(ic_series.mean())
             ic_std = float(ic_series.std())
             ic_ir = float(ic_mean / ic_std) if ic_std > 1e-10 else 0.0
-
-        # 换手率：top quantile 的平均
-        avg_turnover_top = 0.0
-        if not turnover_data.empty:
-            # turnover_data index=date, columns=quantile（如 "1", "2", ..., "5"）
-            # top quantile = 最大数值列
-            if len(turnover_data.columns) > 0:
-                top_col = max(turnover_data.columns, key=lambda x: float(x) if _is_numeric_str(x) else 0)
-                avg_turnover_top = float(turnover_data[top_col].mean())
 
         # 建议结论（参考 RuleJudge 阈值：IC_IR ≥ 0.5, Sharpe ≥ 0.8）
         suggested_verdict = (
@@ -406,9 +458,12 @@ class AlphalensAdapter:
                     forward_periods=forward_periods,
                     quantiles=quantiles,
                 )
-                return AlphalensAdapter.generate_full_report(
+                # 带超时护栏：alphalens 原生计算可能挂起，超时即降级方案 C
+                paths = _generate_full_report_with_timeout(
                     factor_data, output_dir, factor_name
                 )
+                if paths is not None:
+                    return paths
             except Exception as e:
                 logger.warning(
                     f"alphalens 路径失败，降级到方案 C（因子 {factor_name}）: {e}"

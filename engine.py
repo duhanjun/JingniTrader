@@ -195,6 +195,13 @@ COMMON_STOCK_NAME_MAP = {
     "药明康德": "603259.SH",
     "中信证券": "600030.SH",
     "东方财富": "300059.SZ",
+    "寒武纪": "688256.SH",
+    "中芯国际": "688981.SH",
+    "海光信息": "688041.SH",
+    "中科曙光": "603019.SH",
+    "澜起科技": "688008.SH",
+    "科大讯飞": "002230.SZ",
+    "金山办公": "688111.SH",
     "万科A": "000002.SZ",
     "工商银行": "601398.SH",
     "建设银行": "601939.SH",
@@ -509,6 +516,18 @@ class MasterEngine:
         """执行单个阶段，调用对应子 Skill"""
         logger.info(f"=== 开始执行阶段 Step {step_num}: {stage} ===")
 
+        # REPORT 阶段：报告真实产物直接写入归档 step 目录（report_output_dir），
+        # 而非 workspace/reports/。该目录注入 ctx.metadata，reports-engine 据此直接落盘。
+        report_output_dir = ""
+        if stage == "REPORT" and self.archiver:
+            self.archiver.create_step_dir(step_num, stage)
+            report_output_dir = os.path.join(
+                self.archiver.step_dirs.get(stage, ""), "artifacts"
+            )
+            if report_output_dir:
+                os.makedirs(report_output_dir, exist_ok=True)
+                self.ctx.metadata["report_output_dir"] = report_output_dir
+
         artifact_file = EXPECTED_ARTIFACTS.get(stage)
         # 模板报告模式生成 technical_report.html + fundamental_report.html，
         # 缓存检查以 technical_report.html 为准（reports-engine 返回的第一份产物）
@@ -516,19 +535,23 @@ class MasterEngine:
                 and getattr(self.ctx, 'metadata', {}).get("report_template") in ("both", "technical", "fundamental")
                 and not self.ctx.get_artifact("BACKTEST")):
             artifact_file = "technical_report.html"
-        stage_dir = {
-            "DATA": DATA_DIR,
-            "FACTOR": FACTOR_DIR,
-            "MODEL": MODEL_DIR,
-            "BACKTEST": BACKTEST_DIR,
-            "PORTFOLIO": PORTFOLIO_DIR,
-            "EXECUTION": WORK_DIR,
-            "REPORT": REPORT_DIR,
-        }.get(stage, WORK_DIR)
+        if stage == "REPORT":
+            # 报告产物以归档 step 目录为缓存检查位置
+            stage_dir = report_output_dir or REPORT_DIR
+        else:
+            stage_dir = {
+                "DATA": DATA_DIR,
+                "FACTOR": FACTOR_DIR,
+                "MODEL": MODEL_DIR,
+                "BACKTEST": BACKTEST_DIR,
+                "PORTFOLIO": PORTFOLIO_DIR,
+                "EXECUTION": WORK_DIR,
+                "REPORT": REPORT_DIR,
+            }.get(stage, WORK_DIR)
 
         artifact_path = os.path.join(stage_dir, artifact_file) if artifact_file else None
 
-        if self.archiver:
+        if self.archiver and stage != "REPORT":
             self.archiver.create_step_dir(step_num, stage)
 
         if artifact_path and os.path.exists(artifact_path) and not self._force_refresh:
@@ -540,7 +563,11 @@ class MasterEngine:
                 upstream_inputs = [
                     v for k, v in self.ctx.artifacts.items() if k != stage and v
                 ]
-                self.archiver.save_artifact_copy(stage, artifact_path, inputs=upstream_inputs)
+                if stage != "REPORT":
+                    self.archiver.save_artifact_copy(stage, artifact_path, inputs=upstream_inputs)
+                else:
+                    # 缓存命中时报告已在归档目录，仅需补充 sidecar manifest（血缘/哈希）
+                    self.archiver._write_sidecar_manifest(artifact_path, upstream_inputs)
                 self.archiver.record_stage_end(stage, "success")
                 self.archiver.write_step_summary(stage, step_num)
             return True
@@ -562,7 +589,9 @@ class MasterEngine:
                     del sys.modules[key]
             _register_subskill_scripts(stage)
             skill_module = importlib.import_module(module_name)
-        except ImportError as e:
+        except Exception as e:
+            # 放宽捕获：库已安装但导入期抛非 ImportError（如 cvxpy/pypfopt
+            # 加载期 AttributeError/TypeError）也应降级而非击穿 run_pipeline
             error_msg = f"加载子 Skill {module_name} 失败: {e}"
             logger.error(error_msg)
             self.ctx.add_error(error_msg)
@@ -590,12 +619,20 @@ class MasterEngine:
                     upstream_inputs = [
                         v for k, v in self.ctx.artifacts.items() if k != stage and v
                     ]
-                    self.archiver.save_artifact_copy(stage, artifact, inputs=upstream_inputs)
+                    if stage != "REPORT":
+                        # REPORT 阶段产物已直接写入归档 step 目录，无需再复制
+                        self.archiver.save_artifact_copy(stage, artifact, inputs=upstream_inputs)
+                    else:
+                        # 报告已在归档目录，仅需补充 sidecar manifest（血缘/哈希）
+                        self.archiver._write_sidecar_manifest(artifact, upstream_inputs)
                     # 处理多产物场景（如非量化 both 模式生成技术面+基本面两份报告）
                     all_artifacts = result.get("metadata", {}).get("all_artifacts", [])
                     for extra in all_artifacts:
                         if extra and extra != artifact:
-                            self.archiver.save_artifact_copy(stage, extra, inputs=upstream_inputs)
+                            if stage != "REPORT":
+                                self.archiver.save_artifact_copy(stage, extra, inputs=upstream_inputs)
+                            else:
+                                self.archiver._write_sidecar_manifest(extra, upstream_inputs)
                     # T3-7: FACTOR 阶段额外归档 alphalens 报告目录（环境变量启用时存在）
                     if stage == "FACTOR":
                         alphalens_dir = result.get("metadata", {}).get("alphalens_report_dir", "")

@@ -45,3 +45,17 @@ skills/jingni-datafeed/
 # docs 为本地设计/需求文档目录（非运行代码，不纳入版本库）
 docs/
 
+
+# 一次性调试/探针脚本（含明文凭证，禁止纳入版本库）
+_gm*.py
+_diag*.py
+_check_env.py
+_xt*.txt
+_e2e_run.txt
+_e2e*
+_diag_ws/
+_gm_*_ws/
+_live_xtquant_ws/
+_reports_e2e/
+_e2e_workdir/
+_repro_*.py

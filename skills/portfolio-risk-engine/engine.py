@@ -26,13 +26,15 @@ logger = logging.getLogger("portfolio-risk-engine")
 try:
     from pypfopt import EfficientFrontier, risk_models, expected_returns, HRPOpt
     HAS_PYPFOPT = True
-except ImportError:
+except Exception:
+    # 库已安装但导入期抛非 ImportError（如 cvxpy 版本不兼容导致加载期异常）
+    # 也视为不可用，避免上层 import 失败击穿运行流程
     HAS_PYPFOPT = False
 
 try:
     import cvxpy as cp
     HAS_CVXPY = True
-except ImportError:
+except Exception:
     HAS_CVXPY = False
 
 
@@ -83,17 +85,78 @@ class PortfolioOptimizer:
 
         与 estimate_expected_returns 同理，传入的是收益率数据而非价格，
         必须设置 returns_data=True，避免 pypfopt 1.5+ 按价格误处理。
+
+        输入校验：CovarianceShrinkage.ledoit_wolf 在样本不足（< 资产数）或
+        存在 NaN/常数列时会抛 ``ValueError: not enough values to unpack`` 等异常。
+        这里先做最小样本量 / 缺失 / 恒定列检测，失败时降级到样本协方差或
+        对角线收缩，避免直接击穿上层调用。
         """
         if self._fallback:
             return returns.cov()
-        if method == "ledoit_wolf":
-            return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf()
-        elif method == "sample_cov":
-            return risk_models.sample_cov(returns, returns_data=True)
-        elif method == "shrinkage":
-            return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf(shrinkage_target="constant_correlation")
-        else:
-            return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf()
+
+        # ── 输入校验与降级 ──
+        try:
+            _returns = returns.copy()
+            n_obs, n_assets = _returns.shape
+            if n_assets < 1 or n_obs < 2:
+                logger.warning(
+                    "协方差估计跳过：样本不足 (obs=%s, assets=%s)，降级为对角线收缩",
+                    n_obs, n_assets,
+                )
+                return self._diagonal_shrink_cov(_returns)
+            # 缺失值检测
+            if _returns.isnull().any().any():
+                logger.warning("协方差估计：检测到 NaN，先按列前向填充并置零兜底")
+                _returns = _returns.ffill().fillna(0.0)
+            # 常数列检测（方差为 0 会导致 ledoit_wolf 解包失败）
+            const_cols = [c for c in _returns.columns if _returns[c].nunique(dropna=True) <= 1]
+            if const_cols:
+                logger.warning(
+                    "协方差估计：检测到 %d 个常数列，降级为对角线收缩: %s",
+                    len(const_cols), const_cols,
+                )
+                return self._diagonal_shrink_cov(_returns)
+            # 最小样本量校验：ledoit_wolf 需要 obs >= assets，否则解包失败
+            if n_obs < n_assets:
+                logger.warning(
+                    "协方差估计：样本数(%s) < 资产数(%s)，ledoit_wolf 易失败，降级样本协方差",
+                    n_obs, n_assets,
+                )
+                return _returns.cov()
+        except Exception as e:
+            logger.warning("协方差输入校验异常，降级对角线收缩: %s", e)
+            return self._diagonal_shrink_cov(returns)
+
+        try:
+            if method == "ledoit_wolf":
+                return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf()
+            elif method == "sample_cov":
+                return risk_models.sample_cov(returns, returns_data=True)
+            elif method == "shrinkage":
+                return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf(shrinkage_target="constant_correlation")
+            else:
+                return risk_models.CovarianceShrinkage(returns, returns_data=True).ledoit_wolf()
+        except Exception as e:
+            logger.warning(
+                "协方差估计(%s)失败，降级为对角线收缩: %s", method, e
+            )
+            return self._diagonal_shrink_cov(returns)
+
+    @staticmethod
+    def _diagonal_shrink_cov(returns: pd.DataFrame) -> pd.DataFrame:
+        """兜底协方差：对角线收缩（仅保留各资产方差，协方差置 0）。
+
+        保证矩阵正定且形状正确，避免上层优化器因奇异/解包失败而崩溃。
+        """
+        try:
+            var = returns.var().clip(lower=1e-8)
+            cov = pd.DataFrame(np.diag(var.values), index=returns.columns, columns=returns.columns)
+            return cov
+        except Exception:
+            # 极端兜底：单位矩阵
+            n = returns.shape[1] if returns.shape[1] > 0 else 1
+            cols = list(returns.columns) if returns.shape[1] > 0 else [f"a{i}" for i in range(n)]
+            return pd.DataFrame(np.eye(n), index=cols, columns=cols)
 
     def optimize(
         self,

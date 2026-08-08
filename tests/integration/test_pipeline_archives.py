@@ -135,6 +135,7 @@ class TestArchiveStructure:
 
     # ── T3-10: Alphalens 因子分析报告归档验证 ──────────────────────
 
+    @pytest.mark.requires_alphalens
     def test_alphalens_report_archived_when_enabled(self, tmp_path, monkeypatch):
         """QUANT_ALPHALENS_REPORT=1 时，FACTOR 阶段归档中应包含 alphalens 报告子目录。
 
@@ -238,6 +239,7 @@ class TestArchiveStructure:
             "FACTOR 步骤 summary.md 未记录 alphalens_report_dir 元数据"
         )
 
+    @pytest.mark.requires_alphalens
     def test_factor_analysis_summary_report_aggregated(self, tmp_path, monkeypatch):
         """reports-engine 应自动聚合 alphalens metrics.json 生成 factor_analysis_report.html。
 
@@ -259,11 +261,17 @@ class TestArchiveStructure:
         )
         assert results["success"] is True
 
-        # 1) reports-engine 生成 factor_analysis_report.html 在 REPORT_DIR
-        report_dir = os.path.join(str(work_dir), "reports")
-        factor_summary_html = os.path.join(report_dir, "factor_analysis_report.html")
+        # 1) REPORT 阶段产物直接生成在归档 step 目录（不再写 workspace/reports/）
+        archive_dir = results["archive_dir"]
+        report_step_dirs = [
+            d for d in os.listdir(archive_dir)
+            if d.startswith("step_") and "REPORT" in d
+        ]
+        assert report_step_dirs, "REPORT 步骤归档目录不存在"
+        report_artifacts_dir = os.path.join(archive_dir, report_step_dirs[0], "artifacts")
+        factor_summary_html = os.path.join(report_artifacts_dir, "factor_analysis_report.html")
         assert os.path.isfile(factor_summary_html), (
-            f"因子分析汇总报告未生成: {factor_summary_html}"
+            f"因子分析汇总报告未直接生成在归档目录: {factor_summary_html}"
         )
 
         # 2) 验证 HTML 内容包含因子名与结论
@@ -276,18 +284,10 @@ class TestArchiveStructure:
         # 包含因子卡片容器
         assert "factor-card" in html_content, "汇总报告缺少因子卡片结构"
 
-        # 3) 同时验证 REPORT 阶段归档中也复制了 factor_analysis_report.html
-        archive_dir = results["archive_dir"]
-        report_step_dirs = [
-            d for d in os.listdir(archive_dir)
-            if d.startswith("step_") and "REPORT" in d
-        ]
-        assert report_step_dirs, "REPORT 步骤归档目录不存在"
-        archived_summary = os.path.join(
-            archive_dir, report_step_dirs[0], "artifacts", "factor_analysis_report.html"
-        )
-        assert os.path.isfile(archived_summary), (
-            f"汇总报告未归档到 REPORT artifacts: {archived_summary}"
+        # 3) 新行为：workspace/reports/ 不应再生成报告产物（报告只在归档目录）
+        report_dir = os.path.join(str(work_dir), "reports")
+        assert not os.path.isfile(os.path.join(report_dir, "factor_analysis_report.html")), (
+            "报告应直接生成在归档目录，workspace/reports/ 不应保留因子分析报告"
         )
 
     def test_alphalens_report_not_archived_when_disabled(self, tmp_path, monkeypatch):
@@ -323,9 +323,17 @@ class TestArchiveStructure:
             f"默认关闭时不应归档 alphalens metrics.json，但找到: {metrics_in_archive}"
         )
 
-        # REPORT_DIR 中不应生成 factor_analysis_report.html
-        report_dir = os.path.join(str(work_dir), "reports")
-        assert not os.path.isfile(os.path.join(report_dir, "factor_analysis_report.html")), (
+        # 归档 REPORT artifacts 中不应生成 factor_analysis_report.html
+        report_step_dirs = [
+            d for d in os.listdir(archive_dir)
+            if d.startswith("step_") and "REPORT" in d
+        ]
+        factor_summary_in_archive = None
+        if report_step_dirs:
+            factor_summary_in_archive = os.path.join(
+                archive_dir, report_step_dirs[0], "artifacts", "factor_analysis_report.html"
+            )
+        assert not (factor_summary_in_archive and os.path.isfile(factor_summary_in_archive)), (
             "默认关闭时不应生成 factor_analysis_report.html"
         )
 
