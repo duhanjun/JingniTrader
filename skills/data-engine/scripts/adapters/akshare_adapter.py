@@ -41,28 +41,97 @@ class AkshareAdapter(BaseDataProvider):
             try:
                 ticker = self._extract_ticker(code)
                 period = "daily"
-                df = ak.stock_zh_a_hist(
-                    symbol=ticker,
-                    period=period,
-                    start_date=start,
-                    end_date=end,
-                    adjust=adjust
-                )
+                # ETF/基金用专用接口 fund_etf_hist_em（stock_zh_a_hist 只适用 A 股股票，
+                # 对 ETF 返回空导致数据获取失败 → 修复 ETF 标的的数据获取）
+                if self._is_etf_code(ticker):
+                    self._logger.info(f"AkShare: {code} 识别为 ETF，使用 fund_etf_hist_em 接口")
+                    df = ak.fund_etf_hist_em(
+                        symbol=ticker,
+                        period=period,
+                        start_date=start,
+                        end_date=end,
+                        adjust="qfq" if adjust in ("qfq", "hfq") else "",
+                    )
+                    if df is not None and not df.empty:
+                        df = df.rename(columns={
+                            "日期": "date",
+                            "开盘": "open",
+                            "收盘": "close",
+                            "最高": "high",
+                            "最低": "low",
+                            "成交量": "volume",
+                            "成交额": "amount",
+                            "振幅": "amplitude",
+                            "涨跌幅": "change_pct",
+                            "涨跌额": "change",
+                            "换手率": "turnover_rate",
+                        })
+                else:
+                    # 优先用东方财富接口 stock_zh_a_hist；若该接口对该标的失败
+                    #（例如科创板个股偶发 RemoteDisconnected/连接被关闭），
+                    # 自动回退到腾讯/新浪接口 stock_zh_a_daily，保证数据可取。
+                    try:
+                        df = ak.stock_zh_a_hist(
+                            symbol=ticker,
+                            period=period,
+                            start_date=start,
+                            end_date=end,
+                            adjust=adjust
+                        )
+                        if df is not None and not df.empty:
+                            df = df.rename(columns={
+                                "日期": "date",
+                                "开盘": "open",
+                                "收盘": "close",
+                                "最高": "high",
+                                "最低": "low",
+                                "成交量": "volume",
+                                "成交额": "amount",
+                                "振幅": "amplitude",
+                                "涨跌幅": "change_pct",
+                                "涨跌额": "change",
+                                "换手率": "turnover_rate",
+                            })
+                    except Exception as _em_err:
+                        self._logger.warning(
+                            f"AkShare stock_zh_a_hist 获取 {code} 失败: {_em_err}，回退 stock_zh_a_daily(腾讯/新浪)"
+                        )
+                        df = None
+
+                    if df is None or df.empty:
+                        # 回退接口：stock_zh_a_daily（腾讯/新浪，symbol 形如 sh600000 / sz000001）
+                        prefix = "sh" if ticker.startswith(("6", "9")) else "sz" if ticker.startswith(("0", "3")) else "bj"
+                        fallback_symbol = f"{prefix}{ticker}"
+                        try:
+                            df_raw = ak.stock_zh_a_daily(
+                                symbol=fallback_symbol,
+                                adjust="qfq" if adjust in ("qfq", "hfq") else "",
+                            )
+                            if df_raw is None or df_raw.empty:
+                                continue
+                            # 按起止日期过滤
+                            df_raw = df_raw.copy()
+                            df_raw["date"] = pd.to_datetime(df_raw["date"])
+                            if start_date:
+                                df_raw = df_raw[df_raw["date"] >= pd.to_datetime(start_date)]
+                            if end_date:
+                                df_raw = df_raw[df_raw["date"] <= pd.to_datetime(end_date)]
+                            df = df_raw.rename(columns={
+                                "date": "date",
+                                "open": "open",
+                                "close": "close",
+                                "high": "high",
+                                "low": "low",
+                                "volume": "volume",
+                                "amount": "amount",
+                            })
+                        except Exception as _fallback_err:
+                            self._logger.warning(
+                                f"AkShare stock_zh_a_daily 回退获取 {code} 也失败: {_fallback_err}"
+                            )
+                            continue
                 if df is None or df.empty:
                     continue
-                df = df.rename(columns={
-                    "日期": "date",
-                    "开盘": "open",
-                    "收盘": "close",
-                    "最高": "high",
-                    "最低": "low",
-                    "成交量": "volume",
-                    "成交额": "amount",
-                    "振幅": "amplitude",
-                    "涨跌幅": "change_pct",
-                    "涨跌额": "change",
-                    "换手率": "turnover_rate",
-                })
                 df["code"] = code
                 all_data.append(df)
             except Exception as e:
@@ -448,6 +517,16 @@ class AkshareAdapter(BaseDataProvider):
         if "." in code:
             return code.split(".")[0]
         return code
+
+    def _is_etf_code(self, ticker: str) -> bool:
+        """判断 6 位数字代码是否为 ETF/场内基金。
+
+        - 沪市 ETF/基金：以 5 开头（510/511/512/513/515/516/518/561/563/588 等）
+        - 深市 ETF：以 159 开头
+        （A 股股票以 0/3/6 开头，不会误判。）
+        """
+        t = str(ticker).strip()
+        return (t.startswith("5") and len(t) == 6) or t.startswith("159")
 
     # ================================================================
     # 统一数据类型接口（供 fetch_by_type 调用）
