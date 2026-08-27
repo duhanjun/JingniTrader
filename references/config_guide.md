@@ -17,7 +17,8 @@
 
 | 变量名 | 描述 | 可选值 | 默认值 |
 |--------|------|--------|--------|
-| DATA_BACKEND | 数据源后端 | tushare/baostock/akshare/xtquant/gm | "tushare" |
+| DATA_BACKENDS | 数据源后端（逗号分隔的优先级链，缺源自动降级） | baostock/akshare/websearch/tushare/xtquant/gm/tdxquant/wind/ifind | "baostock,akshare,websearch" |
+| DATA_BACKEND | （兼容）单源模式，仅当 DATA_BACKENDS 未设置时生效 | tushare/baostock/akshare/xtquant/gm | 空 |
 | BACKTEST_BACKEND | 回测框架 | native/rqalpha/backtrader/gm | "native" |
 | TRADE_BACKEND | 交易接口 | xtquant/gm | "xtquant" |
 | FACTOR_BACKEND | 因子计算库（技术指标） | talib/pandas_ta | "pandas_ta" |
@@ -25,6 +26,13 @@
 | QUANT_ALPHALENS_REPORT | 是否生成 Alphalens 因子分析报告 | 0/1 | "0" |
 | QUANT_LEGACY_PIPELINE | 强制走旧 4 步硬编码因子处理路径（兼容回滚） | 0/1 | "0" |
 | QUANT_WORK_DIR | 工作目录根路径 | 任意路径 | "./workspace" |
+
+> **数据源说明**：`DATA_BACKENDS` 是主变量，支持逗号分隔的优先级链（如
+> `DATA_BACKENDS=baostock,akshare,websearch`），缺源时自动降级到下一个。`tushare`
+> /`xtquant`/`gm`/`tdxquant`/`wind`/`ifind` 为 opt-in 商业源，需用户显式启用或设置
+> `DATA_BACKENDS` 环境变量（参见 `skills/data-engine/scripts/config.py` 的
+> `DEFAULT_DATA_SOURCES`）。旧的 `DATA_BACKEND` 单源变量仅作兼容，未设置
+> `DATA_BACKENDS` 时优先使用单源模式。
 
 ## factor-engine 高性能 DataFrame 后端
 
@@ -213,7 +221,7 @@ NEW_STOCK_EXCLUDE_DAYS = 60         # 新股保护期
 ```bash
 export TUSHARE_TOKEN="your_token_here"
 export GM_TOKEN="your_gm_token_here"
-export DATA_BACKEND="tushare"
+export DATA_BACKENDS="baostock,akshare,websearch"
 export LOG_LEVEL="DEBUG"
 ```
 
@@ -224,7 +232,7 @@ import os
 os.environ['TUSHARE_TOKEN'] = 'your_token_here'
 
 from engine import run, MasterEngine
-from context import Context
+from scripts.context import Context
 
 # 创建 Context
 ctx = Context(

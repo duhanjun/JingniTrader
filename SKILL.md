@@ -116,11 +116,21 @@ jingni-trader 是量化交易 Skill 套件的**主协调中枢**，负责：
 
 系统采用**单一工作流模型**：根据用户是否明确需要构建可回测/可交易策略，选择执行深度。因子计算/IC 分析本身是两条路径共用的前置步骤，不构成"策略构建"意图。
 
-| 用户意图 | 触发条件 | 阶段路径 | 报告类型 |
-|------|---------|---------|---------|
-| **绩效复盘/归因**（`report_intent=attribution`） | 包含"绩效归因/归因分析/复盘/实盘报告/盈亏分析/执行报告/交易复盘/绩效复盘"等关键词（**最高优先级**） | DATA → FACTOR → EXECUTION → REPORT（跳过 MODEL/BACKTEST/PORTFOLIO） | 绩效归因报告（Round-Trip 归因/成本分析/压力期表现） |
-| **策略构建**（`strategy_required=True`） | 包含"回测/策略/模型/组合/实盘/选股/风控/下单"等动作关键词 | DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT | 策略回测绩效报告（夏普/回撤/归因） |
-| **分析（默认）**（`strategy_required=False`） | 未命中策略构建关键词（含"分析/技术面/基本面/因子/alpha/ic"等） | DATA → FACTOR → REPORT | 个股深度分析报告（技术面+基本面） |
+### 项目用户意图 — 阶段/场景/报告/引擎流程/触发规则对照表
+
+agent 运行本 skill 时，根据下表匹配用户意图 → 调度对应引擎 → 生成对应报告：
+
+| 投研场景 | 用户意图表述 | 意图标识 | 阶段路径 | 触发的引擎流程（按序） | 触发规则（关键词/条件） | 最终报告产物 |
+|---------|------------|---------|---------|----------------------|----------------------|------------|
+| **量化投研开发** | 因子分析 / IC分析 | `factor`（隐式附加） | DATA → FACTOR → REPORT | data-engine → factor-engine → reports-engine（`factor_analysis_report`） | FACTOR 产物存在时伴随触发；不进门户、不阻断主报告 | 因子分析报告（附加产物） |
+| **量化投研开发** | 策略构建 / 回测验证 / 选股 | `strategy_required=True`（隐式） | DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT | data-engine → factor-engine → strategy-model-engine → backtest-engine → portfolio-risk-engine → execution-monitor-engine → reports-engine（`backtest_report`） | 含"回测/策略/模型/选股/实盘/下单"等动作关键词 | 策略回测报告（净值曲线/夏普/回撤/行业归因） |
+| **量化投研开发** | 组合优化 | `portfolio` | 同上（策略管线完整跑，REPORT 阶段命中 `portfolio_report`） | … → portfolio-risk-engine → reports-engine（`portfolio_report`） | `report_intent=portfolio` | 组合优化报告 |
+| **量化投研开发** | 执行监控 | `execution` | 同上（策略管线完整跑，REPORT 阶段命中 `execution_report`） | … → execution-monitor-engine → reports-engine（`execution_report`） | `report_intent=execution` | 执行监控报告（账户概览/持仓/成交/委托） |
+| **主观投研分析** | 个股技术面分析 | `technical` | DATA → FACTOR → REPORT | data-engine → factor-engine → reports-engine（`technical_report`） | `report_intent=technical` 或 `report_template=technical` 或含"技术面/K线/形态/指标"等关键词 | 技术分析报告（K线图/指标/资金面/龙虎榜） |
+| **主观投研分析** | 个股基本面分析 | `fundamental` | DATA → FACTOR → REPORT | data-engine → factor-engine → reports-engine（`fundamental_report`） | `report_intent=fundamental` 或 `report_template=fundamental` 或含"基本面/财报/估值/财务"等关键词 | 基本面分析报告（财务数据/估值/股东结构） |
+| **主观投研分析** | 个股综合分析（默认） | `both`（隐式） | DATA → FACTOR → REPORT | data-engine → factor-engine → reports-engine（`technical_report` + `fundamental_report`，`_run_plugin_many` 多命中聚合） | `report_template=both` / 同时命中技术面+基本面关键词 / 无明确意图的默认路径 | 技术分析报告 + 基本面分析报告（双报告联合生成） |
+| **执行复盘** | 绩效归因 / 复盘 | `attribution` | DATA → FACTOR → EXECUTION → REPORT | data-engine → factor-engine → execution-monitor-engine → reports-engine（`attribution_report`） | `report_intent=attribution` 或含"绩效归因/归因分析/复盘/实盘报告/盈亏分析/交易复盘/绩效复盘"等关键词（**最高优先级**） | 绩效归因报告（Round-Trip 归因/成本分析/压力期表现） |
+| **兜底** | 无明确意图 / 全部未命中 | — | DATA → FACTOR → REPORT | data-engine → factor-engine → reports-engine（`fallback_report`） | 无任何插件命中时，兜底插件 `fallback_report` 自动接管 | 默认个股报告（技术面+基本面） |
 
 **默认走分析路径**：意图模糊或仅提及"因子/分析"时，`strategy_required=False`，因子仅用于分析，不构建策略。用户明确要求"回测/策略/实盘"等动作时才升级到完整 7 阶段管线。
 
@@ -144,28 +154,46 @@ reports-engine 支持**报告插件**，新增报告 = 新增一个插件文件�
 - `render.py`：渲染器，实现 `render(data, ctx, output_path)` 生成 HTML
 - `<报告id>.html.j2`：HTML 模板（继承 `base.html.j2` 复用统一骨架）
 
-**触发机制**：`reports-engine.run()` 在 REPORT 阶段执行，路由优先级为：
-1. 归因（`report_intent=attribution`）→ 2. 组合（`report_intent=portfolio`）→ 3. 执行（`report_intent=execution`）
-4. **报告插件匹配**（`find_by_trigger`，按 plugin.yaml 的 trigger 匹配）→ 5. 回测产物 → 6. 模板化个股分析
+**触发机制**：`reports-engine.run()` 在 REPORT 阶段执行，路由已**收敛为两分支**：
+- **分支 A（插件匹配）**：由 `_run_plugin_auto` 统一执行，优先级为：
+  1. `report_intent` ∈ {attribution/portfolio/execution} → 直接映射到对应插件（`_run_plugin_enhanced`，含意图产物校验）
+  2. **BACKTEST 产物存在且回测插件命中** → 回测报告（优先于默认模板，与 master 引擎 REPORT 产物判断一致）
+  3. 显式 `report_template`（technical/fundamental/both，无 BACKTEST）→ 模板类插件（`both` 多命中 → `_run_plugin_many` 联合生成技术+基本面双报告）
+  4. 其余 `find_by_trigger` 匹配（资金流等）
+  5. 全部未命中 → **兜底插件 `fallback_report`** 生成默认个股报告
+- **分支 B（内置兜底）**：`_run_template_report`，仅当插件机制关闭 / 无插件命中且无兜底插件 / 匹配异常时作为终极兜底
 
 **插件触发条件**支持三种方式（plugin.yaml 的 `trigger`）：
 - 关键词识别：`{ keyword: ["资金流", "主力资金"] }` —— 用户输入含这些词即触发
-- 字段精确匹配：`{ field: report_intent, equals: technical }`
+- 字段精确匹配：`{ field: report_intent, equals: technical }` 或 `{ field: report_template, equals: both }`
 - 产物存在性：`{ artifact: BACKTEST }`
 
-**示例**：内置 `capital_flow_report` 插件通过关键词"资金流/主力资金"触发。用户说"分析 002594.SZ 的资金流"，REPORT 阶段命中该插件，生成 `capital_flow_report.html` 资金流报告。
+**多命中聚合**：当多个插件同时命中（如 `report_template=both` 命中 technical+fundamental）时，
+`_run_plugin_many` 联合生成多份报告，并统一注册门户、注入 LLM 深度解读、汇总 `report_data.json`。
+
+**自定义输出文件名**：插件可在 `plugin.yaml` 声明 `output_file`（如回测插件声明 `report.html`），
+生成时直接输出该文件名，无需复制改名。
+
+**兜底插件**：声明 `fallback: true` 且无 trigger 的插件（`fallback_report`），在无任何插件命中时
+承担默认个股报告（技术面+基本面）。
+
+**示例**：内置 `technical_report` 插件通过 `report_intent=technical`（或关键词命中技术面）触发。用户说"分析 002594.SZ 的技术面"，REPORT 阶段命中该插件，生成 `technical_report.html` 技术分析报告。
 
 **现有插件清单**（`plugins/` 目录）：
 | 插件 id | 触发方式 | 说明 |
 |---|---|---|
-| `technical_report` | `report_intent=technical` | 技术分析报告（通过插件触发） |
-| `fundamental_report` | `report_intent=fundamental` | 基本面分析报告（通过插件触发） |
-| `capital_flow_report` | 关键词"资金流/主力资金" | 资金流分析报告（示例插件） |
-| `attribution_report` | 插件注册 | 绩效归因（走内置路由） |
-| `portfolio_report` | 插件注册 | 组合优化（走内置路由） |
-| `execution_report` | 插件注册 | 执行监控（走内置路由） |
-| `backtest_report` | 插件注册 | 策略回测（走内置路由） |
-| `factor_analysis_report` | 插件注册 | 因子分析（附加产物） |
+| `technical_report` | `report_intent=technical` / `report_template`∈{technical,both} | 技术分析报告 |
+| `fundamental_report` | `report_intent=fundamental` / `report_template`∈{fundamental,both} | 基本面分析报告 |
+| `attribution_report` | `report_intent=attribution` | 绩效归因（经 `_run_plugin_enhanced`） |
+| `portfolio_report` | `report_intent=portfolio` | 组合优化（经 `_run_plugin_enhanced`） |
+| `execution_report` | `report_intent=execution` | 执行监控（经 `_run_plugin_enhanced`） |
+| `backtest_report` | `{ artifact: BACKTEST }`，`output_file: report.html` | 策略回测报告（直接输出 report.html） |
+| `factor_analysis_report` | `{ artifact: FACTOR }` | 因子分析（附加产物，不进门户、不阻断主报告） |
+| `fallback_report` | 无 trigger（`fallback: true`） | 兜底插件：无任何插件命中时生成默认个股报告 |
+
+> 其中 `attribution_report` / `portfolio_report` / `execution_report` / `backtest_report`
+> 均由插件机制承载（不再有独立内置路由分支）；`backtest_report` 声明 `output_file: report.html`
+> 直接输出固定文件名，兼容下游缓存/门户/归档旧约定。
 
 **开发新报告**：复制任一插件文件夹 → 改 `plugin.yaml`（触发词/所需产物）+ `render.py` + 模板 → 放入 `plugins/` 下即可被自动扫描注册。详见 `docs/产品需求文档_报告插件化机制.md`。
 

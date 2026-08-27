@@ -34,12 +34,13 @@ engine = MasterEngine()
 ctx = engine.parse_intent("帮我用近3年A股数据做一个20日反转因子选股回测")
 ```
 
-##### `execute_stage(stage: str) -> bool`
+##### `execute_stage(stage: str, step_num: int) -> bool`
 
 执行单个阶段，调用对应的子 Skill。
 
 **参数：**
 - `stage` (str): 阶段名称（DATA/FACTOR/MODEL/BACKTEST/PORTFOLIO/EXECUTION/REPORT）
+- `step_num` (int): 当前步骤序号（用于归档子目录命名）
 
 **返回：**
 - `bool`: 执行是否成功
@@ -47,7 +48,7 @@ ctx = engine.parse_intent("帮我用近3年A股数据做一个20日反转因子�
 **示例：**
 
 ```python
-success = engine.execute_stage("DATA")
+success = engine.execute_stage("DATA", step_num=1)
 ```
 
 ##### `run_pipeline(user_input: str = None, ctx: Context = None) -> dict`
@@ -176,16 +177,17 @@ ctx = Context.from_json(json_str)
 
 ### SKILL_MODULES
 
-子 Skill 模块映射：
+子 Skill 模块映射（`engine.py` 中实际为 `skills.<skill>.engine` 点分路径，运行时会
+自动注册对应 `scripts` 包到 `sys.modules['scripts']`）：
 ```python
 {
-    "DATA": "a_share_data_engine.scripts",
-    "FACTOR": "a_share_factor_engine.scripts",
-    "MODEL": "strategy_model_engine.scripts",
-    "BACKTEST": "backtest_engine.scripts",
-    "PORTFOLIO": "portfolio_risk_engine.scripts",
-    "EXECUTION": "execution_monitor_engine.scripts",
-    "REPORT": "reports_engine.scripts",
+    "DATA": "skills.data-engine.engine",
+    "FACTOR": "skills.factor-engine.engine",
+    "MODEL": "skills.strategy-model-engine.engine",
+    "BACKTEST": "skills.backtest-engine.engine",
+    "PORTFOLIO": "skills.portfolio-risk-engine.engine",
+    "EXECUTION": "skills.execution-monitor-engine.engine",
+    "REPORT": "skills.reports-engine.engine",
 }
 ```
 
@@ -218,7 +220,7 @@ ctx = Context.from_json(json_str)
 
 ```python
 from engine import run, MasterEngine
-from context import Context
+from scripts.context import Context
 
 # 方式1：使用自然语言
 result = run(user_input="帮我用近3年A股数据做一个20日反转因子选股回测")

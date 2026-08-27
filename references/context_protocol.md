@@ -197,7 +197,7 @@ with open("context.json", "r", encoding="utf-8") as f:
 ### 完整示例
 
 ```python
-from context import Context
+from scripts.context import Context
 
 # 创建 Context
 ctx = Context(
