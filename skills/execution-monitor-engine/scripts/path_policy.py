@@ -134,15 +134,24 @@ class GitChangeTracker:
     def _git_status_porcelain(self) -> Set[str]:
         """调用 git status --porcelain --untracked-files=all，返回相对路径集合。"""
         try:
+            # Windows 中文系统默认编码为 GBK，git 输出中可能含 UTF-8 中文路径字节，
+            # text=True 时若用默认编码解码会抛 UnicodeDecodeError（reader thread），
+            # 导致 result.stdout 为 None → 下游 .splitlines() 抛 AttributeError。
+            # 显式指定 utf-8 + errors="replace" 保证跨平台稳定解码（GAP 修复）。
             result = subprocess.run(
                 ["git", "status", "--porcelain", "--untracked-files=all"],
                 cwd=self.repo_root,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=10,
             )
             if result.returncode != 0:
                 logger.warning(f"git status 失败: {result.stderr}")
+                return set()
+            if result.stdout is None:
+                logger.warning("git status 未返回 stdout，返回空快照")
                 return set()
             paths = set()
             for line in result.stdout.splitlines():

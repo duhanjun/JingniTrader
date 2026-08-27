@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 
 from ..base.base_executor import BaseExecutor
-from ..config import GM_TOKEN, GM_ACCOUNT_ID
+from ..config import GM_TOKEN, GM_ACCOUNT_ID, TRADE_MODE
 
 
 class GMExecutor(BaseExecutor):
@@ -26,15 +26,21 @@ class GMExecutor(BaseExecutor):
         return self._available
 
     def _try_connect(self) -> bool:
-        """尝试连接掘金终端,失败返回False不抛异常
+        """尝试连接掘金交易通道，失败返回False不抛异常。
 
-        掘金SDK无login方法,连接流程: set_token + set_account_id
+        掘金SDK无login方法，连接流程: set_token + set_account_id。
+        注意：仿真账户与实盘账户使用的 gm.api 接口**同一套**
+        （set_token/set_account_id/get_cash/order_volume），但底层**连接通道不同**：
+          - 实盘账户(TRADE_MODE=live)：必须通过本地掘金终端，get_cash 走终端交易网关
+          - 仿真账户(TRADE_MODE=paper)：无需终端，SDK 可直连仿真服务器
+        TRADE_MODE 仅影响连接通道选择与错误提示，接口调用一致。
         """
         if self._available:
             return True
         try:
             import gm.api as gm
             self._gm = gm
+            mode = (TRADE_MODE or "paper").lower()
             # 1. 设置 token
             token = GM_TOKEN
             if token:
@@ -53,7 +59,30 @@ class GMExecutor(BaseExecutor):
             self._account_id = account_id
             self._connected = True
             self._available = True
-            self._logger.info("掘金量化终端连接成功")
+            # 主动验证交易通道：set_token/set_account_id 只是绑定账户，
+            # get_cash 才能真正触发交易服务器请求。若交易通道未建立
+            # （掘金常见错误 1013"交易服务调用错误"），get_cash 会抛错，
+            # 此时不应上报"连接成功"，否则后续所有交易操作都将在运行中失败。
+            try:
+                probe = gm.get_cash()
+                if probe is None:
+                    self._logger.warning("掘金交易通道异常: get_cash 返回空，交易通道可能未建立")
+            except Exception as e:
+                msg = str(e)
+                if "1013" in msg or "交易服务" in msg:
+                    hint = (
+                        "请确认掘金终端已登录且交易通道就绪"
+                        if mode == "live"
+                        else "请确认仿真账户(访问账户)已开通且可直连仿真服务器"
+                    )
+                    self._logger.error(
+                        f"掘金交易通道未就绪(错误 {msg.strip()}，当前模式={mode}): {hint}"
+                    )
+                else:
+                    self._logger.warning(f"掘金 get_cash 探测异常: {e}")
+                self._available = False
+                return False
+            self._logger.info(f"掘金量化连接成功(交易通道已验证, mode={mode})")
             return True
         except ImportError:
             self._logger.error("gm 未安装")
@@ -145,15 +174,20 @@ class GMExecutor(BaseExecutor):
                     price=price
                 )
 
+            # 兼容掘金返回 dict 或 order 对象（.get 仅 dict 可用）
+            def _g(obj, key, default=""):
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
             return {
                 "success": True,
-                "order_id": order.get("cl_ord_id", ""),
+                "order_id": _g(order, "cl_ord_id", ""),
                 "code": code,
                 "side": side,
                 "volume": volume,
                 "price": price,
-                "status": str(order.get("status", "unknown")),
-                "message": str(order.get("ord_rej_reason_detail", "")),
+                "status": str(_g(order, "status", "unknown")),
+                "message": str(_g(order, "ord_rej_reason_detail", "")),
             }
         except Exception as e:
             self._logger.error(f"发送订单失败 {code} {side}: {e}")

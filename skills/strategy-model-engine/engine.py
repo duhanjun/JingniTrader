@@ -61,6 +61,63 @@ warnings.filterwarnings('ignore')
 logger = logging.getLogger("strategy-model-engine")
 
 
+# ---------------------------------------------------------------------------
+# 跨 skill 复用 factor-engine 的截面 IC 计算（统一口径，避免重复实现）
+# ---------------------------------------------------------------------------
+# factor-engine/scripts/optimizations/ic_vectorized.py 已实现向量化逐日截面
+# IC（ic_series_pearson / ic_series_spearman），本引擎训练评估阶段的 IC 计算
+# 改为复用之，消除与 factor-engine 的重复实现。
+#
+# 加载方式：以独立包名 fe_optimizations 加载 factor-engine 的 optimizations 包
+# 及其 ic_vectorized 子模块，使模块内 `from . import resolve_backend` 相对导入
+# 能正确解析（避免 spec_from_file_location 单文件加载导致的 "no known parent
+# package" 错误）。加载失败时降级为全局 corr（与原实现一致）。
+_FACTOR_IC_CACHE: Dict[str, Any] = {"func": None, "loaded": False}
+
+
+def _load_factor_ic():
+    """加载 factor-engine 的 ic_series_pearson（带缓存，失败返回 None）。"""
+    if _FACTOR_IC_CACHE["loaded"]:
+        return _FACTOR_IC_CACHE["func"]
+    _FACTOR_IC_CACHE["loaded"] = True
+    try:
+        import importlib.util as _ilu
+        import sys as _sys
+
+        _fe_root = os.path.dirname(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        )
+        _opt_dir = os.path.join(
+            _fe_root, "skills", "factor-engine", "scripts", "optimizations"
+        )
+        _init_path = os.path.join(_opt_dir, "__init__.py")
+        _ic_path = os.path.join(_opt_dir, "ic_vectorized.py")
+        if not os.path.exists(_ic_path):
+            logger.warning("factor-engine ic_vectorized.py 不存在，IC 降级全局 corr")
+            return None
+
+        # 以 fe_optimizations 包名加载，保证 ic_vectorized 内相对导入可解析
+        _init_spec = _ilu.spec_from_file_location(
+            "fe_optimizations", _init_path,
+            submodule_search_locations=[_opt_dir],
+        )
+        _opt_pkg = _ilu.module_from_spec(_init_spec)
+        _sys.modules["fe_optimizations"] = _opt_pkg
+        _init_spec.loader.exec_module(_opt_pkg)
+
+        _ic_spec = _ilu.spec_from_file_location(
+            "fe_optimizations.ic_vectorized", _ic_path
+        )
+        _ic_mod = _ilu.module_from_spec(_ic_spec)
+        _sys.modules["fe_optimizations.ic_vectorized"] = _ic_mod
+        _ic_spec.loader.exec_module(_ic_mod)
+
+        _FACTOR_IC_CACHE["func"] = getattr(_ic_mod, "ic_series_pearson", None)
+    except Exception as _e:  # pragma: no cover - 加载失败兜底
+        logger.warning("加载 factor-engine ic_vectorized 失败，IC 降级全局 corr: %s", _e)
+    return _FACTOR_IC_CACHE["func"]
+
+
 class _NullContext:
     """MLflow 不可用时的空上下文管理器"""
     def __enter__(self):
@@ -150,53 +207,91 @@ class ModelEngine:
         logger.info(f"生成 {len(splits)} 个交叉验证分割")
         return splits
 
+    def _compute_ic(
+        self,
+        pred_series: pd.Series,
+        y_series: pd.Series,
+        dates_series: Optional[pd.Series] = None,
+    ) -> float:
+        """计算模型预测 IC（信息系数），统一复用 factor-engine 截面 IC。
+
+        语义（重要）：
+        - 若传入真实截面日期 ``dates_series``（与 pred_series 同索引对齐），
+          则按日期分组计算逐日截面 Pearson IC，取均值作为标量 IC。这是量化
+          标准 IC 口径（避免跨时序混算），比全局 corr 更正确。
+        - 若未传入 dates_series（如 run() 无 test_dates 的默认路径），则降级
+          为全样本全局 Pearson 相关，与原实现 ``pred_series.corr(y_series)``
+          数值一致，保证既有输出语义不变。
+        - factor-engine 模块不可用时同样降级全局 corr。
+        """
+        if dates_series is not None and len(dates_series) == len(pred_series):
+            try:
+                ic_func = _load_factor_ic()
+                if ic_func is not None:
+                    ic_series = ic_func(
+                        pred_series, y_series, dates=dates_series, min_obs=1
+                    )
+                    if ic_series is not None and len(ic_series) > 0:
+                        return float(ic_series.mean())
+            except Exception as _e:  # pragma: no cover - 计算兜底
+                logger.warning("截面 IC 计算失败，降级全局 corr: %s", _e)
+
+        # 降级：全局 Pearson 相关（与原实现一致）
+        return float(pred_series.corr(y_series))
+
     def create_model(self, trial: Optional['optuna.Trial'] = None) -> Any:
-        """根据配置创建模型"""
-        if MODEL_TYPE == 'lightgbm':
-            if HAS_LGB:
-                if trial is not None and HAS_OPTUNA:
-                    params = {
-                        'n_estimators': trial.suggest_int('n_estimators', 50, 500),
-                        'max_depth': trial.suggest_int('max_depth', 3, 15),
-                        'num_leaves': trial.suggest_int('num_leaves', 20, 300),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                        'subsample': trial.suggest_float('subsample', 0.5, 1.0),
-                        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
-                        'random_state': 42,
-                        'n_jobs': -1,
-                        'verbosity': -1,
-                    }
-                else:
-                    params = {'random_state': 42, 'n_jobs': -1, 'verbosity': -1}
+        """根据配置创建模型
 
-                if LABEL_TYPE == 'classification':
-                    return lgb.LGBMClassifier(**params)
-                else:
-                    return lgb.LGBMRegressor(**params)
+        首选 ML 库（lightgbm/catboost）未安装时自动降级到 sklearn 的
+        random_forest（不抛错），保证 MODEL 阶段在缺依赖环境下稳定运行。
+        """
+        model_type = MODEL_TYPE
+        if model_type == 'lightgbm' and not HAS_LGB:
+            logger.warning("LightGBM 未安装，自动降级为 random_forest")
+            model_type = 'random_forest'
+        elif model_type == 'catboost' and not HAS_CATBOOST:
+            logger.warning("CatBoost 未安装，自动降级为 random_forest")
+            model_type = 'random_forest'
+
+        if model_type == 'lightgbm':
+            if trial is not None and HAS_OPTUNA:
+                params = {
+                    'n_estimators': trial.suggest_int('n_estimators', 50, 500),
+                    'max_depth': trial.suggest_int('max_depth', 3, 15),
+                    'num_leaves': trial.suggest_int('num_leaves', 20, 300),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'subsample': trial.suggest_float('subsample', 0.5, 1.0),
+                    'colsample_bytree': trial.suggest_float('colsample_bytree', 0.5, 1.0),
+                    'random_state': 42,
+                    'n_jobs': -1,
+                    'verbosity': -1,
+                }
             else:
-                raise ImportError("LightGBM 未安装")
+                params = {'random_state': 42, 'n_jobs': -1, 'verbosity': -1}
 
-        elif MODEL_TYPE == 'catboost':
-            if HAS_CATBOOST:
-                if trial is not None and HAS_OPTUNA:
-                    params = {
-                        'iterations': trial.suggest_int('iterations', 50, 500),
-                        'depth': trial.suggest_int('depth', 3, 12),
-                        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-                        'random_seed': 42,
-                        'verbose': False,
-                    }
-                else:
-                    params = {'random_seed': 42, 'verbose': False}
-
-                if LABEL_TYPE == 'classification':
-                    return CatBoostClassifier(**params)
-                else:
-                    return CatBoostRegressor(**params)
+            if LABEL_TYPE == 'classification':
+                return lgb.LGBMClassifier(**params)
             else:
-                raise ImportError("CatBoost 未安装")
+                return lgb.LGBMRegressor(**params)
 
-        elif MODEL_TYPE == 'logistic_regression':
+        elif model_type == 'catboost':
+            if trial is not None and HAS_OPTUNA:
+                params = {
+                    'iterations': trial.suggest_int('iterations', 50, 500),
+                    'depth': trial.suggest_int('depth', 3, 12),
+                    'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+                    'random_seed': 42,
+                    'verbose': False,
+                }
+            else:
+                params = {'random_seed': 42, 'verbose': False}
+
+            if LABEL_TYPE == 'classification':
+                return CatBoostClassifier(**params)
+            else:
+                return CatBoostRegressor(**params)
+
+        elif model_type == 'logistic_regression':
             if LABEL_TYPE != 'classification':
                 raise ValueError(
                     "logistic_regression 仅支持分类任务，请设置 LABEL_TYPE=classification"
@@ -213,7 +308,7 @@ class ModelEngine:
                 params = {'max_iter': 1000, 'random_state': 42}
             return LogisticRegression(**params)
 
-        elif MODEL_TYPE == 'random_forest':
+        elif model_type == 'random_forest':
             if trial is not None and HAS_OPTUNA:
                 params = {
                     'n_estimators': trial.suggest_int('n_estimators', 50, 500),
@@ -344,7 +439,18 @@ class ModelEngine:
 
                 pred_series = pd.Series(predictions, index=X_test.index)
                 y_test_aligned = y_test.loc[X_test.index]
-                metrics['ic'] = pred_series.corr(y_test_aligned)
+                # 截面 IC 需要真实日期；test_dates（测试行索引）按 X_test 对齐。
+                # test_dates 为 None（run() 默认路径）或仅含测试行时，reindex 后
+                # 与 X_test.index 同序；若无真实日期则降级全局 corr（语义不变）。
+                ic_dates = None
+                if test_dates is not None:
+                    try:
+                        ic_dates = test_dates.reindex(X_test.index)
+                        if ic_dates.isna().all():
+                            ic_dates = None
+                    except Exception:
+                        ic_dates = None
+                metrics['ic'] = self._compute_ic(pred_series, y_test_aligned, ic_dates)
             else:
                 if hasattr(model, 'score'):
                     metrics['train_score'] = model.score(X_train, y_train)
@@ -424,6 +530,59 @@ def run(ctx) -> Dict[str, Any]:
         # 过滤掉全NaN的列
         feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
 
+        # ── M4: 因子→策略闭环 ──
+        # 可选开关 QUANT_USE_ALPHALENS_VALID=1：仅使用 alphalens verdict 为 ACCEPT/REVIEW 的因子
+        # 并输出 strategy_factors.json（策略因子清单 + alphalens 有效性），供回测报告交叉引用。
+        _alphalens_valid = os.environ.get("QUANT_USE_ALPHALENS_VALID", "0") == "1"
+        _factor_verdict: Dict[str, str] = {}
+        if _alphalens_valid:
+            _work = os.environ.get("QUANT_WORK_DIR", "./workspace")
+            _tid = getattr(ctx, "task_id", "") or "default"
+            _a_dir = os.path.join(_work, "reports", "alphalens", _tid)
+            _m = os.path.join(_a_dir, "metrics.json")
+            if os.path.exists(_m):
+                try:
+                    with open(_m, "r", encoding="utf-8") as _f:
+                        _mm = json.load(_f)
+                    _factor_verdict = {
+                        x.get("factor"): x.get("suggested_verdict", "REVIEW")
+                        for x in _mm if isinstance(x, dict)
+                    }
+                except Exception as _e:
+                    logger.warning("读取 alphalens verdict 失败: %s", _e)
+            else:
+                # 兼容旧的按因子拆分的 *_metrics.json
+                import glob as _glob
+                for _mf in sorted(_glob.glob(os.path.join(_a_dir, "*_metrics.json"))):
+                    try:
+                        with open(_mf, "r", encoding="utf-8") as _f:
+                            _d = json.load(_f)
+                        if isinstance(_d, dict) and _d.get("factor"):
+                            _factor_verdict[_d["factor"]] = _d.get("suggested_verdict", "REVIEW")
+                    except Exception:
+                        pass
+            _keep = [f for f in feature_cols if _factor_verdict.get(f, "REVIEW") != "REJECT"]
+            if _keep != feature_cols:
+                logger.info("M4: 按 alphalens verdict 过滤因子 %d -> %d", len(feature_cols), len(_keep))
+                feature_cols = _keep
+
+        # 写出策略因子清单（供回测报告"因子清单"章节交叉引用）
+        _strategy_factors = {
+            "factors": [
+                {"name": f, "verdict": _factor_verdict.get(f, "NA")} for f in feature_cols
+            ],
+            "alphalens_filter": _alphalens_valid,
+            "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        try:
+            _sf_path = os.path.join(MODEL_DIR, "strategy_factors.json")
+            with open(_sf_path, "w", encoding="utf-8") as _f:
+                json.dump(_strategy_factors, _f, ensure_ascii=False, indent=2)
+            logger.info("M4: 策略因子清单已生成: %s (%d 个因子)", _sf_path, len(feature_cols))
+        except Exception as _e:
+            logger.warning("M4: strategy_factors.json 写出失败: %s", _e)
+            _sf_path = ""
+
         X, y, dates = engine.prepare_data(factor_df, price_df, feature_cols)
 
         best_params = engine.optimize_hyperparams(X, y, dates)
@@ -447,6 +606,7 @@ def run(ctx) -> Dict[str, Any]:
                 "model_type": MODEL_TYPE,
                 "metrics": metrics,
                 "feature_cols": feature_cols,
+                "strategy_factors_path": _sf_path,  # M4
             },
             "error": ""
         }

@@ -288,7 +288,7 @@ REPORT 阶段会自动聚合所有因子的 `metrics.json`，生成 `factor_anal
 
 ```python
 from engine import run
-from context import Context
+from scripts.context import Context
 
 ctx = Context(
     task_id="task_001",

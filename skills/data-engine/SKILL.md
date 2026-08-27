@@ -189,7 +189,7 @@ external_data → ctx.data_sources → DATA_BACKENDS → 默认免费链 → syn
 
 ```python
 from engine import run
-from context import Context
+from scripts.context import Context
 
 # 创建 Context
 ctx = Context(

@@ -367,6 +367,98 @@ def _run_processor_chain(
     return final_df, ic_results, selected_factors, removed_factors
 
 
+# ---------------------------------------------------------------------------
+# M1: 归因辅助列增强 —— 为标准风格暴露 + 行业归因提供因子列
+# 对齐 reports-engine `make_style_exposure_chart`（size/value/momentum/volatility/
+# quality/growth）与 `make_industry_attribution_chart`（industry + alpha_score）。
+# 多股横截面时逐期 z-score 标准化；单股/少股时保留原始映射值（供时序归因）。
+# ---------------------------------------------------------------------------
+_STYLE_FACTOR_MAP = {
+    "size": "lncap",
+    "value": "pe_ttm",
+    "momentum": "ret_20d",
+    "volatility": "volatility_20d",
+    "quality": "roe_ttm",
+    "growth": "revenue_growth_yoy",
+}
+# value 类因子越小越便宜，取负号使其“越大越好”以便统一正向暴露语义
+_INVERTED_STYLE = {"value"}
+
+
+def _augment_attribution_columns(
+    factor_df: pd.DataFrame,
+    financial_df: Optional[pd.DataFrame] = None,
+    data_df: Optional[pd.DataFrame] = None,
+    min_cross_section: int = 5,
+) -> pd.DataFrame:
+    """为因子表补充行业列与标准风格列，供回测报告因子归因使用。
+
+    参数
+    ----
+    factor_df: 合并后的因子宽表（含 code/date）。
+    financial_df: 财务数据（可选），用于提取 industry 列。
+    data_df: 行情数据（可选），兜底 industry 来源。
+    min_cross_section: 横截面股票数阈值，>= 该值才做逐期 z-score 标准化。
+
+    返回增强后的 factor_df（原地新增列，不破坏原有列）。
+    """
+    if factor_df is None or factor_df.empty:
+        return factor_df
+
+    # ── 1) industry 列：优先财务数据，其次行情数据，最后 UNKNOWN ──
+    if "industry" not in factor_df.columns:
+        factor_df["industry"] = "UNKNOWN"
+        src = None
+        if financial_df is not None and "industry" in financial_df.columns:
+            src = financial_df[["code", "industry"]].drop_duplicates("code")
+        elif data_df is not None and "industry" in data_df.columns:
+            src = data_df[["code", "industry"]].drop_duplicates("code")
+        if src is not None and not src.empty:
+            merged = factor_df[["code"]].merge(src, on="code", how="left")
+            # 空字符串 / NaN / 空白 均视为未知行业
+            ind = merged["industry"].astype(str).str.strip()
+            factor_df["industry"] = np.where((ind == "") | (ind.astype(str) == "nan"), "UNKNOWN", ind)
+        logger.info(
+            "M1 归因列增强: industry 填充完成（来源=%s）",
+            "financial" if (financial_df is not None and "industry" in financial_df.columns)
+            else "data" if (data_df is not None and "industry" in data_df.columns)
+            else "UNKNOWN",
+        )
+
+    # ── 2) 标准风格列：映射 + 多股横截面逐期 z-score ──
+    for style, src_col in _STYLE_FACTOR_MAP.items():
+        if style in factor_df.columns:
+            continue  # 已存在则不覆盖
+        if src_col not in factor_df.columns:
+            factor_df[style] = np.nan
+            continue
+        vals = pd.to_numeric(factor_df[src_col], errors="coerce")
+        if style in _INVERTED_STYLE:
+            vals = -vals
+        factor_df[style] = vals
+
+    # 计算每期横截面股票数（用于决定是否 z-score）
+    n_codes = factor_df.groupby("date")["code"].nunique()
+    max_cross = int(n_codes.max()) if not n_codes.empty else 1
+    do_zs = max_cross >= min_cross_section
+
+    if do_zs:
+        # 横截面逐期 z-score（行业中性化可选，此处做简单截面标准化）
+        zcols = [s for s in _STYLE_FACTOR_MAP if s in factor_df.columns]
+        factor_df[zcols] = (
+            factor_df.groupby("date")[zcols]
+            .transform(lambda x: (x - x.mean()) / x.std().replace(0, np.nan))
+        )
+        logger.info("M1 归因列增强: %d 个风格列已做横截面 z-score（截面 %d 只）", len(zcols), max_cross)
+    else:
+        logger.info(
+            "M1 归因列增强: 横截面股票数 %d < %d，保留风格列原始值（时序归因模式）",
+            max_cross, min_cross_section,
+        )
+
+    return factor_df
+
+
 def run(ctx) -> Dict[str, Any]:
     """
     a-share-factor-engine 的 run 函数
@@ -513,6 +605,20 @@ def run(ctx) -> Dict[str, Any]:
             task_id=ctx.task_id,
             data_path=data_path,
         )
+
+        # M1: 归因辅助列增强（industry + 6 风格列），供回测报告因子归因使用
+        try:
+            fin_path = ctx.get_artifact("FINANCIAL") if hasattr(ctx, "get_artifact") else None
+            financial_df = None
+            if fin_path and os.path.exists(fin_path):
+                financial_df = pd.read_parquet(fin_path)
+            final_df = _augment_attribution_columns(
+                final_df,
+                financial_df=financial_df,
+                data_df=df,
+            )
+        except Exception as e:
+            logger.warning("M1 归因列增强失败（不阻塞主流程）: %s", e)
 
         os.makedirs(FACTOR_DIR, exist_ok=True)
         output_path = os.path.join(FACTOR_DIR, "factor_data.parquet")

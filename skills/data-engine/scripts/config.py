@@ -97,7 +97,10 @@ DATA_FORMAT = os.environ.get("DATA_FORMAT", "parquet")
 MAX_WORKERS = int(os.environ.get("DATA_MAX_WORKERS", 4))
 
 # ── 行情复权方式 ──────────────────────────
-ADJUST_MODE = os.environ.get("ADJUST_MODE", "hfq")
+# 默认使用前复权(qfq)：保证最新交易日价格 = 实际成交价，技术指标计算最准确。
+# 注意：baostock 的 adjustflag 语义为 1=后复权、2=前复权，akshare 的 stock_zh_a_hist
+#       与 stock_zh_a_daily 均支持 "qfq"。此默认值保证跨数据源复权口径一致。
+ADJUST_MODE = os.environ.get("ADJUST_MODE", "qfq")
 
 # ── 缓存目录 ──────────────────────────────
 _WORK_DIR = os.environ.get("QUANT_WORK_DIR", "./workspace")

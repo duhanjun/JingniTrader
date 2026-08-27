@@ -94,7 +94,7 @@ portfolio-risk-engine 是 A 股量化投研的**组合优化与风控引擎**，
 
 ```python
 from engine import run
-from context import Context
+from scripts.context import Context
 
 ctx = Context(
     task_id="task_001",

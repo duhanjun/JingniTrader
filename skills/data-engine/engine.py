@@ -1033,8 +1033,12 @@ def run(ctx) -> Dict[str, Any]:
         }
     """
     try:
+        # 强制刷新感知（GAP 修复，与 master 引擎第 440 行一致）：
+        # 组合优化/绩效归因定时刷新需要重拉最新行情，若这里只看
+        # ctx.get_artifact("DATA") 是否存在就短路，会拿到旧数据。
+        _force = os.environ.get("QUANT_FORCE_REFRESH", "").lower() in ("1", "true", "yes")
         existing = ctx.get_artifact("DATA")
-        if existing and os.path.exists(existing):
+        if existing and os.path.exists(existing) and not _force:
             return {
                 "success": True,
                 "artifact_path": existing,

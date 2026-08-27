@@ -113,7 +113,7 @@ strategy-model-engine 是 A 股量化投研的**策略开发与模型训练引�
 
 ```python
 from engine import run
-from context import Context
+from scripts.context import Context
 
 ctx = Context(
     task_id="task_001",

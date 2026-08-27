@@ -483,8 +483,15 @@ def run(ctx) -> Dict[str, Any]:
                 from scripts.adapters.gm_adapter import GMExecutor
                 executor = GMExecutor()
                 if not executor._try_connect():
-                    return {"success": False, "artifact_path": "", "metadata": {},
-                            "error": "掘金终端连接失败,请检查 GM_TOKEN 及客户端运行状态"}
+                    # gm 连接失败时降级到 PaperExecutor，保证执行监控流程不中断
+                    # （gm.api 的 get_cash 对仿真账户会报 1013；实盘账户终端未就绪也会失败）
+                    logger.warning(
+                        "掘金终端连接失败，降级到模拟交易模式(PaperExecutor)。"
+                        "如需实盘，请检查 GM_TOKEN/GM_ACCOUNT_ID、掘金终端登录状态及账户实盘交易权限。"
+                    )
+                    executor = PaperExecutor()
+                    executor.load_state()
+                    mode = "paper"  # 降级标记
             else:
                 return {"success": False, "artifact_path": "", "metadata": {},
                         "error": f"不支持的交易后端: {backend}"}
@@ -533,6 +540,350 @@ def run(ctx) -> Dict[str, Any]:
     except Exception as e:
         logger.exception("执行引擎执行失败")
         return {"success": False, "artifact_path": "", "metadata": {}, "error": str(e)}
+
+
+# ============================================================================
+# LIVE 模式入口
+# ============================================================================
+
+def _load_reports_engine_modules():
+    """动态加载 reports-engine scripts 模块（运行时加载，避免硬依赖）
+
+    注意: 会覆盖 sys.modules["scripts"] 指向 reports-engine。
+    但 engine.py 顶层 import 已完成，不影响已绑定的变量。
+    """
+    import importlib.util as ilu
+    from unittest import mock
+
+    # 定位 reports-engine/scripts 目录
+    engine_dir = os.path.dirname(os.path.abspath(__file__))
+    skills_dir = os.path.dirname(engine_dir)
+    reports_scripts = os.path.join(skills_dir, "reports-engine", "scripts")
+
+    if not os.path.isdir(reports_scripts):
+        logger.warning(f"reports-engine 目录不存在: {reports_scripts}")
+        return None
+
+    # 清理旧 scripts 模块
+    for key in list(sys.modules.keys()):
+        if key == "scripts" or key.startswith("scripts."):
+            sys.modules.pop(key, None)
+
+    # mock 可选依赖
+    for _m in ("talib", "pandas_ta", "sklearn", "sklearn.linear_model",
+               "sklearn.ensemble", "sklearn.model_selection"):
+        if _m not in sys.modules:
+            sys.modules[_m] = mock.MagicMock()
+
+    # 加载 reports-engine scripts 包
+    init_py = os.path.join(reports_scripts, "__init__.py")
+    if not os.path.exists(init_py):
+        logger.warning("reports-engine scripts/__init__.py 不存在")
+        return None
+
+    spec = ilu.spec_from_file_location(
+        "scripts", init_py,
+        submodule_search_locations=[reports_scripts],
+    )
+    pkg = ilu.module_from_spec(spec)
+    sys.modules["scripts"] = pkg
+    spec.loader.exec_module(pkg)
+
+    # 加载所需子模块
+    module_specs = [
+        ("scripts.config", os.path.join(reports_scripts, "config.py")),
+        ("scripts.cross_engine_adapter", os.path.join(reports_scripts, "cross_engine_adapter.py")),
+        ("scripts.status_server", os.path.join(reports_scripts, "status_server.py")),
+        ("scripts.renderers.svg_components", os.path.join(reports_scripts, "renderers", "svg_components.py")),
+        ("scripts.templates.portfolio_charts_p1p2", os.path.join(reports_scripts, "templates", "portfolio_charts_p1p2.py")),
+        ("scripts.templates.execution_charts_p1p2", os.path.join(reports_scripts, "templates", "execution_charts_p1p2.py")),
+        ("scripts.templates.live_polling", os.path.join(reports_scripts, "templates", "live_polling.py")),
+        ("scripts.templates.portfolio_report", os.path.join(reports_scripts, "templates", "portfolio_report.py")),
+        ("scripts.templates.execution_report", os.path.join(reports_scripts, "templates", "execution_report.py")),
+    ]
+    for mod_name, mod_path in module_specs:
+        if not os.path.exists(mod_path):
+            continue
+        spec = ilu.spec_from_file_location(mod_name, mod_path)
+        mod = ilu.module_from_spec(spec)
+        sys.modules[mod_name] = mod
+        spec.loader.exec_module(mod)
+    return True
+
+
+def _generate_live_report_html(monitor, audit_path, ledger_path, mode, backend,
+                               live_mode="http", snapshot_file="snapshot.js"):
+    """生成 LIVE 模式执行监控报告 HTML
+
+    设计（渲染收敛）：execution-monitor-engine 只负责"实时采集 + 触发"，
+    报告的渲染组装统一复用 reports-engine 插件的统一入口
+    ``scripts.templates.execution_report.build_execution_report``（插件 execution_report
+    与 LIVE 模式共用同一套模板 + 轮询能力，避免渲染组装逻辑在两端重复维护）。
+
+    参数:
+        monitor: LiveMonitor 实例（实时账户快照来源）
+        audit_path: 委托日志路径
+        ledger_path: 成交账本路径
+        mode: 交易模式 (paper/live)
+        backend: 交易后端 (paper/xtquant/gm)
+        live_mode: 数据传输方式 "http"（StatusServer）或 "jsonp"（snapshot.js 文件）
+        snapshot_file: JSONP 模式下 snapshot.js 的相对路径
+
+    返回:
+        完整的 HTML 字符串
+    """
+    if not _load_reports_engine_modules():
+        return (
+            "<html><body><h1>LIVE 模式（报告引擎不可用）</h1>"
+            "<p>reports-engine 未安装，仅提供 API 服务。</p></body></html>"
+        )
+
+    try:
+        from scripts.templates.execution_report import (
+            build_execution_report,
+            load_trade_log,
+        )
+
+        # ── 实时采集（保留 execution-monitor-engine 职责）：实时账户快照 + 委托日志 ──
+        account_snapshot = monitor.unified_account_snapshot()
+        loaded_trades = load_trade_log(audit_path)
+        orders_executed = sum(1 for t in loaded_trades if t.get("status") == "filled")
+        orders_failed = sum(1 for t in loaded_trades if t.get("status") == "rejected")
+
+        # 组装成插件统一入口 build_execution_report 所需的 execution_metadata
+        execution_metadata = {
+            "mode": mode,
+            "backend": backend,
+            "backend_available": True,
+            "account_snapshot": account_snapshot,
+            "orders_executed": orders_executed,
+            "orders_failed": orders_failed,
+        }
+
+        # ── 渲染：复用插件统一入口 build_execution_report（含 LIVE 轮询）──
+        # JSONP（推荐）用 snapshot.js 文件轮询（file:// 双击即看，无需 HTTP 服务器）。
+        # HTTP（原方案）由 build_execution_report 内部启动 StatusServer 提供实时 API。
+        return build_execution_report(
+            execution_metadata=execution_metadata,
+            audit_log_path=audit_path,
+            ledger_path=ledger_path,
+            include_p1=True,
+            include_p2=True,
+            enable_live_polling=True,
+            live_mode=live_mode,
+            live_snapshot_file=snapshot_file,
+            live_poll_interval=3,
+            serve_blocking=False,
+        )
+    except Exception as e:
+        logger.exception("生成 LIVE 报告 HTML 失败")
+        return f"<html><body><h1>LIVE 模式</h1><p>报告生成失败: {e}</p></body></html>"
+
+
+def run_live(ctx, live_data_mode: str = "jsonp") -> Dict[str, Any]:
+    """LIVE 模式入口: 启动实时监控服务
+
+    将 LIVE 模式集成到 execution-monitor-engine 正式流程。
+    通过 Context 调用，符合引擎调用规范。
+
+    流程:
+    1. 根据 TRADE_MODE/TRADE_BACKEND 初始化执行器
+    2. 创建 LiveMonitor 统一数据格式
+    3. 写入数据产物（account_state.json / trade_log.jsonl / ledger.jsonl）
+    4. 动态加载 reports-engine 生成执行监控 HTML 报告
+    5. 根据 live_data_mode 选择数据传输方式：
+       - "jsonp": 写 snapshot.js 文件，HTML 双击即看，无需 HTTP 服务器（推荐）
+       - "http": 启动 StatusServer 托管报告 + 提供 /api/snapshot 实时 API
+    6. 阻塞运行直到 Ctrl+C
+
+    参数:
+        ctx: Context 对象（兼容接口，LIVE 模式不强制要求 artifacts）
+        live_data_mode: 数据传输方式 "jsonp"（默认）或 "http"
+
+    返回:
+        {"success": bool, "port": int, "error": str, "report_path": str}
+    """
+    try:
+        os.makedirs(EXECUTION_DIR, exist_ok=True)
+
+        mode = TRADE_MODE
+        backend = TRADE_BACKEND
+
+        # 1. 初始化执行器
+        if mode == "paper":
+            executor = PaperExecutor()
+            executor.load_state()
+        elif mode == "live":
+            if backend == "xtquant":
+                from scripts.adapters.xtquant_adapter import XtQuantExecutor
+                executor = XtQuantExecutor()
+                if not executor.connect():
+                    return {"success": False, "port": 0,
+                            "error": "xtquant 连接失败,请检查 XTQUANT_PATH/XTQUANT_ACCOUNT 配置及客户端运行状态"}
+            elif backend == "gm":
+                from scripts.adapters.gm_adapter import GMExecutor
+                executor = GMExecutor()
+                if not executor._try_connect():
+                    # gm 连接失败时降级到 PaperExecutor，保证 LIVE 监控流程不中断
+                    logger.warning(
+                        "掘金终端连接失败，降级到模拟交易模式(PaperExecutor)。"
+                        "如需实盘，请检查 GM_TOKEN/GM_ACCOUNT_ID、掘金终端登录状态及账户实盘交易权限。"
+                    )
+                    executor = PaperExecutor()
+                    executor.load_state()
+                    mode = "paper"  # 降级标记
+            else:
+                return {"success": False, "port": 0, "error": f"不支持的后端: {backend}"}
+        else:
+            return {"success": False, "port": 0, "error": f"未知模式: {mode}"}
+
+        # 2. 创建 LiveMonitor
+        from scripts.live_monitor import LiveMonitor
+        monitor = LiveMonitor(executor)
+
+        # 3. 写入数据产物
+        paths = monitor.write_artifacts(EXECUTION_DIR)
+
+        # 4. 确定报告输出目录
+        _work_dir = os.environ.get("QUANT_WORK_DIR", "./workspace")
+        _report_dir = os.path.join(_work_dir, "reports")
+        os.makedirs(_report_dir, exist_ok=True)
+
+        if live_data_mode == "jsonp":
+            # ── JSONP 模式：写 snapshot.js 文件，HTML 双击即看 ──
+            # LIVE 报告独立子目录，避免污染静态报告
+            live_dir = os.path.join(_report_dir, "live")
+            os.makedirs(live_dir, exist_ok=True)
+            snapshot_path = os.path.join(live_dir, "snapshot.js")
+
+            # 首次写入 snapshot.js
+            monitor.write_jsonp_snapshot(snapshot_path)
+
+            # 生成 LIVE 报告 HTML（使用 JSONP 轮询脚本）
+            report_html = _generate_live_report_html(
+                monitor=monitor,
+                audit_path=paths["audit_path"],
+                ledger_path=paths["ledger_path"],
+                mode=mode,
+                backend=backend,
+                live_mode="jsonp",
+                snapshot_file="snapshot.js",
+            )
+
+            # 写入 execution_live.html
+            html_path = os.path.join(live_dir, "execution_live.html")
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(report_html)
+            logger.info(f"LIVE 报告已生成（JSONP 模式）: {html_path}")
+
+            # 更新报告门户 manifest
+            try:
+                import importlib.util as ilu
+                _reports_scripts = os.path.join(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                    "reports-engine", "scripts"
+                )
+                portal_spec = ilu.spec_from_file_location(
+                    "report_portal",
+                    os.path.join(_reports_scripts, "report_portal.py")
+                )
+                portal_mod = ilu.module_from_spec(portal_spec)
+                portal_spec.loader.exec_module(portal_mod)
+
+                portal_mod.upsert_report(
+                    report_dir=_report_dir,
+                    report_type="execution_live",
+                    file_path=html_path,
+                    task_id=ctx.task_id if hasattr(ctx, 'task_id') else "",
+                    live=True,
+                    backend=backend,
+                    snapshot_file="live/snapshot.js",
+                )
+                portal_mod.generate_portal(_report_dir)
+            except Exception as e:
+                logger.warning(f"更新报告门户失败（不阻断）: {e}")
+
+            print(f"\n{'='*60}")
+            print(f"LIVE 实盘报告已就绪 ({backend} · JSONP 模式)")
+            print(f"双击打开 HTML 文件即可查看实时数据:")
+            print(f"  {html_path}")
+            print(f"门户页:")
+            print(f"  {os.path.join(_report_dir, 'index.html')}")
+            print(f"数据来源: {backend} 实时接口（每 3 秒自动刷新 snapshot.js）")
+            print(f"按 Ctrl+C 退出服务")
+            print(f"{'='*60}\n", flush=True)
+
+            # 6. 阻塞循环：定时写 snapshot.js
+            # GAP 修复：每 60 次循环（约 3 分钟）追加一次 ledger，
+            # 让 LIVE 模式下 ledger.jsonl 随实时成交增长，绩效归因可拿到新交易。
+            _ledger_tick = 0
+            _ledger_interval = max(int(os.environ.get("QUANT_LEDGER_APPEND_TICKS", "60")), 1)
+            try:
+                while True:
+                    time.sleep(3)
+                    monitor.write_jsonp_snapshot(snapshot_path)
+                    _ledger_tick += 1
+                    if _ledger_tick % _ledger_interval == 0:
+                        try:
+                            monitor.write_artifacts(EXECUTION_DIR)
+                            logger.info(f"LIVE ledger 已周期追加（tick={_ledger_tick}）")
+                        except Exception as e:
+                            logger.warning(f"LIVE ledger 周期追加失败（不阻断）: {e}")
+            except KeyboardInterrupt:
+                print("\n服务已停止")
+                return {"success": True, "port": 0, "error": "",
+                        "report_path": html_path}
+
+        else:
+            # ── HTTP 模式：由 build_execution_report 内部启动 StatusServer 托管报告 ──
+            report_html = _generate_live_report_html(
+                monitor=monitor,
+                audit_path=paths["audit_path"],
+                ledger_path=paths["ledger_path"],
+                mode=mode,
+                backend=backend,
+            )
+
+            # build_execution_report 的 HTTP 模式已在内部启动 StatusServer 并生成
+            # 含真实端口轮询脚本的 HTML（不再需要二次启动 / 占位端口替换）。
+            # 从 HTML 中提取实际端口（形如 http://127.0.0.1:{port} 或 :{port}/）。
+            import re as _re
+            port = 0
+            m = _re.search(r"127\.0\.0\.1:(\d+)", report_html)
+            if m:
+                port = int(m.group(1))
+
+            # 写端口文件
+            port_file = os.path.join(os.path.dirname(EXECUTION_DIR), ".live_port")
+            with open(port_file, "w") as f:
+                f.write(str(port))
+
+            print(f"\n{'='*60}")
+            print(f"LIVE 实盘报告已就绪 ({backend} · HTTP 模式)，请用浏览器访问:")
+            print(f"  http://127.0.0.1:{port}/")
+            print(f"数据来源: {backend} 实时接口（每 3 秒自动刷新）")
+            print(f"按 Ctrl+C 退出服务")
+            print(f"{'='*60}\n", flush=True)
+
+            # 6. 阻塞运行：StatusServer 由 build_execution_report 内部启动为守护线程，
+            # 此处保持主线程存活直到 Ctrl+C。
+            try:
+                while True:
+                    time.sleep(3)
+                    # 实时刷新 account_state.json，供 StatusServer 的 /api/snapshot 返回最新快照
+                    try:
+                        monitor.write_artifacts(EXECUTION_DIR)
+                    except Exception as e:
+                        logger.warning(f"HTTP LIVE 刷新账本失败（不阻断）: {e}")
+            except KeyboardInterrupt:
+                print("\n服务已停止")
+
+            return {"success": True, "port": port, "error": "",
+                    "report_path": ""}
+
+    except Exception as e:
+        logger.exception("LIVE 模式启动失败")
+        return {"success": False, "port": 0, "error": str(e), "report_path": ""}
 
 
 if __name__ == "__main__":

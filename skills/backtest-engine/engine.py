@@ -108,10 +108,26 @@ def run(ctx) -> Dict[str, Any]:
                 factor_path = ctx.get_artifact("FACTOR")
                 if factor_path:
                     factor_df = pd.read_parquet(factor_path)
-                    feature_cols = [c for c in factor_df.columns if c not in ['code', 'date', 'industry']]
-                    feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
-                    if 'alpha_score' in feature_cols:
-                        feature_cols = ['alpha_score'] + [c for c in feature_cols if c != 'alpha_score']
+                    # 优先使用 MODEL 阶段训练时的特征列顺序（ctx.metadata["MODEL"]["feature_cols"]）。
+                    # 训练/预测特征顺序必须完全一致，否则 sklearn 等模型会因 feature_names 不匹配
+                    # 抛 "The feature names should match those that were passed during fit"。
+                    feature_cols = None
+                    try:
+                        trained_cols = ctx.metadata.get("MODEL", {}).get("feature_cols")
+                        if isinstance(trained_cols, list) and trained_cols:
+                            # 只取 factor_df 中实际存在的列，保持训练顺序；缺失列则回退到本地推导
+                            missing = [c for c in trained_cols if c not in factor_df.columns]
+                            if not missing:
+                                feature_cols = trained_cols
+                    except Exception:
+                        feature_cols = None
+                    if not feature_cols:
+                        # 回退：按因子列序推导（训练时 alpha_score 置尾）
+                        feature_cols = [c for c in factor_df.columns
+                                        if c not in ['code', 'date', 'industry', 'alpha_score']]
+                        feature_cols = [c for c in feature_cols if not factor_df[c].isna().all()]
+                        if 'alpha_score' in factor_df.columns:
+                            feature_cols.append('alpha_score')
                     X = factor_df[feature_cols].fillna(0)
                     preds = model.predict(X)
                     signals = factor_df[['code', 'date']].copy()

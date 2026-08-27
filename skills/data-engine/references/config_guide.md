@@ -70,7 +70,7 @@ import os
 os.environ['DATA_BACKENDS'] = 'baostock,akshare,websearch'
 
 from engine import run
-from context import Context
+from scripts.context import Context
 
 ctx = Context(task_id="task_001", stock_pool=["000001.SZ", "600000.SH"])
 ctx.start_date = "2021-01-01"
