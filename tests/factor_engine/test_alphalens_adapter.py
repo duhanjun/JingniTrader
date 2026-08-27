@@ -284,10 +284,10 @@ def test_extract_metrics_correctness():
     """
     mod = _load_adapter()
 
-    # 构造 mock factor_data 和 alphalens.performance 返回值
-    fake_factor_data = mock.MagicMock()
+    # 构造真实 factor_data：需含 factor_quantile 列（_extract_metrics 依赖它计算换手率）
+    fake_factor_data = pd.DataFrame({"factor_quantile": [1, 2, 3, 4, 5] * 10})
 
-    # mock alphalens.performance 的三个函数
+    # mock alphalens.performance 的各函数（兼容 alphalens-reloaded 0.4.x）
     fake_al = mock.MagicMock()
     # 分层收益：2 列（top/bot），10 行
     fake_al.performance.factor_returns.return_value = pd.DataFrame(
@@ -297,10 +297,8 @@ def test_extract_metrics_correctness():
     fake_al.performance.factor_information_coefficient.return_value = pd.DataFrame(
         {"1D": [0.05] * 10, "5D": [0.04] * 10, "20D": [0.03] * 10}
     )
-    # 换手率：10 行 × 5 列（quantile 1-5）
-    fake_al.performance.factor_top_bottom_quantile_turnover.return_value = pd.DataFrame(
-        {str(i): [0.1 + i * 0.01] * 10 for i in range(1, 6)}
-    )
+    # 换手率：quantile_turnover 返回 top quantile 的固定换手率序列，均值 = 0.15
+    fake_al.performance.quantile_turnover.return_value = pd.Series([0.15] * 10)
 
     with mock.patch.dict(sys.modules, {"alphalens": fake_al}):
         metrics = mod.AlphalensAdapter._extract_metrics(fake_factor_data, "test_factor")
@@ -346,8 +344,9 @@ def test_to_alphalens_format_basic():
 
     # 验证返回的是 DataFrame
     assert isinstance(factor_data, pd.DataFrame)
-    # MultiIndex 应含 (date, code)
-    assert factor_data.index.names == ["date", "code"]
+    # MultiIndex 应含 (date, code)；alphalens-reloaded 0.4.x 将列名统一为 asset
+    assert factor_data.index.names[0] == "date"
+    assert factor_data.index.names[1] in ("code", "asset")
     # 应含 quantile 列（alphalens 自动添加）
     assert "factor_quantile" in factor_data.columns or any(
         "quantile" in c.lower() for c in factor_data.columns

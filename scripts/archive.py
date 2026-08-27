@@ -102,7 +102,12 @@ class RunArchiver:
             return
         dest = os.path.join(step_dir, "artifacts", os.path.basename(artifact_path))
         if os.path.isfile(artifact_path):
-            shutil.copy2(artifact_path, dest)
+            # 产物已直接落在归档 artifacts 目录（如 REPORT 阶段报告由子引擎写入
+            # 归档 step_3_REPORT/artifacts 后再调用本方法）时，跳过自我复制，
+            # 仅补写 sidecar manifest，避免"先生成再复制"的冗余与误解。
+            already_in_archive = os.path.abspath(dest) == os.path.abspath(artifact_path)
+            if not already_in_archive:
+                shutil.copy2(artifact_path, dest)
             # P1-3.5: 生成 sidecar manifest（仅对文件，目录暂不生成）
             self._write_sidecar_manifest(dest, inputs)
         elif os.path.isdir(artifact_path):

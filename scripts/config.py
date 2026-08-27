@@ -93,11 +93,19 @@ MIN_WEIGHT = 0.0                   # 最小持仓权重（不可做空）
 
 # ── 执行监控参数 ──────────────────────────
 EXECUTION_DIR = os.path.join(WORK_DIR, "execution")
-TRADE_MODE = "paper"              # 交易模式：paper / live
+# 交易模式：paper（默认，模拟）/ live（实盘）。从环境变量读取，支持切换后端测试。
+TRADE_MODE = os.environ.get("TRADE_MODE", "paper")
 MAX_SINGLE_ORDER_RATIO = 0.02      # 单笔订单最大金额比例
 MAX_ORDER_FREQUENCY = 5            # 最大下单频率（笔/分钟）
 AUDIT_LOG_PATH = os.path.join(LOG_DIR, "audit.log")
 ACCOUNT_STATE_PATH = os.path.join(WORK_DIR, "account_state.json")
+# 实盘交易后端配置（与 execution-monitor-engine 保持一致，从环境变量读取）。
+# 主 scripts.config 补充这些常量，保证 xtquant_adapter 等 `from scripts.config import ...`
+# 在子 skill scripts 包切换时不会因缺失而 ImportError。
+XTQUANT_PATH = os.environ.get("XTQUANT_PATH", "")   # miniQMT userdata_mini 路径
+XTQUANT_ACCOUNT = os.environ.get("XTQUANT_ACCOUNT", "")  # miniQMT 资金账号
+GM_TOKEN = os.environ.get("GM_TOKEN", "")           # 掘金量化 token
+GM_ACCOUNT_ID = os.environ.get("GM_ACCOUNT_ID", "")  # 掘金账户ID(终端获取)
 
 # ── 报告生成参数 ──────────────────────────
 REPORT_TITLE = "jingnitrader 回测报告"

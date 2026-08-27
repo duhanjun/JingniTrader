@@ -489,5 +489,110 @@ class TestAttributionIntent:
         assert order == sorted(order)
 
 
+# ============================================================================
+# Part 6: SKILL.md 意图表参数化驱动（表格驱动，覆盖 9 条用户意图场景）
+# ============================================================================
+
+class TestIntentTableParametrized:
+    """以「数据驱动表格」形式覆盖 SKILL.md / README.md 中的用户意图对照表。
+
+    每条用例对应意图表中的一行，声明：
+        - user_input：与文档示例一致的自然语言
+        - expected_stages：期望的 target_stages（按 STAGE_ORDER 排序）
+        - report_intent：期望的 report_intent（None 表示不命中专项报告）
+
+    新增/修改 SKILL.md 意图表时，应同步在此表追加/更新用例，防止文档-代码漂移。
+    """
+
+    # (user_input, expected_target_stages, expected_report_intent)
+    INTENT_TABLE = [
+        # ① 因子分析 / IC 分析（附加产物，走分析路径）
+        (
+            "用近3年数据做因子分析和 IC 分析",
+            ["DATA", "FACTOR", "REPORT"],
+            None,
+        ),
+        # ② 策略构建 / 回测 / 选股（完整 7 阶段管线）
+        (
+            "帮我用近3年A股数据做一个20日反转因子选股回测",
+            ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"],
+            None,
+        ),
+        # ③ 组合优化（parse_intent 阶段识别为完整策略管线；
+        #    report_intent=portfolio 由 REPORT 阶段 reports-engine 插件决定，此处为 None）
+        (
+            "优化当前组合，最大回撤控制在15%以内",
+            ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"],
+            None,
+        ),
+        # ④ 执行监控（同③：parse_intent 阶段只路由到完整管线，
+        #    report_intent=execution 由 REPORT 阶段插件决定，此处为 None）
+        (
+            "生成当前执行监控报告，看看账户持仓和成交",
+            ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"],
+            None,
+        ),
+        # ⑤ 个股技术面分析
+        (
+            "分析 002594.SZ 比亚迪的技术面",
+            ["DATA", "FACTOR", "REPORT"],
+            None,
+        ),
+        # ⑥ 个股基本面分析
+        (
+            "分析 002594.SZ 比亚迪的基本面",
+            ["DATA", "FACTOR", "REPORT"],
+            None,
+        ),
+        # ⑦ 个股综合分析（默认 both）
+        (
+            "分析 002594.SZ 比亚迪的技术面和基本面",
+            ["DATA", "FACTOR", "REPORT"],
+            None,
+        ),
+        # ⑧ 绩效归因 / 复盘（最高优先级路径）
+        (
+            "生成上个月实盘绩效归因报告",
+            ["DATA", "FACTOR", "EXECUTION", "REPORT"],
+            "attribution",
+        ),
+        # ⑨ 兜底：无明确意图 → 默认个股分析
+        (
+            "帮我看看平安银行怎么样",
+            ["DATA", "FACTOR", "REPORT"],
+            None,
+        ),
+    ]
+
+    def _make_engine(self):
+        import engine
+        return engine.MasterEngine()
+
+    @pytest.mark.parametrize(
+        "user_input,expected_stages,expected_report_intent",
+        [pytest.param(*case, id=f"case_{i}") for i, case in enumerate(INTENT_TABLE)],
+    )
+    def test_intent_table_route(self, user_input, expected_stages, expected_report_intent):
+        """每条意图表用例都解析到期望的 target_stages 与 report_intent。"""
+        ctx = self._make_engine().parse_intent(user_input)
+        assert ctx.target_stages == expected_stages, (
+            f"输入 '{user_input}' 的 target_stages 不匹配："
+            f"期望 {expected_stages}，实际 {ctx.target_stages}"
+        )
+        if expected_report_intent is not None:
+            assert ctx.metadata.get("report_intent") == expected_report_intent, (
+                f"输入 '{user_input}' 的 report_intent 不匹配："
+                f"期望 {expected_report_intent}，实际 {ctx.metadata.get('report_intent')}"
+            )
+
+    @pytest.mark.parametrize("idx", range(len(INTENT_TABLE)))
+    def test_intent_table_stages_sorted(self, idx):
+        """每条用例的期望 target_stages 都必须按 STAGE_ORDER 升序（防止用例本身写错）。"""
+        import engine
+        _, expected_stages, _ = self.INTENT_TABLE[idx]
+        order = [engine.STAGE_ORDER[s] for s in expected_stages]
+        assert order == sorted(order), f"用例 {idx} 的 expected_stages 未按 STAGE_ORDER 排序"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])

@@ -131,9 +131,12 @@ class TestIfindAdapterInit:
 
     def test_init_raises_when_ifindpy_missing(self, monkeypatch):
         mod, _, _ = _load_ifind_adapter(monkeypatch)
-        sys.modules.pop("iFinDPy", None)
-        with pytest.raises(Exception) as exc_info:
-            mod.IfindAdapter()
+        # 模拟 iFinDPy 缺失：将 sys.modules["iFinDPy"] 置为 None 会触发
+        # "import of iFinDPy halted; None in sys.modules"，从而抛 ImportError，
+        # 相比 pop 更可靠（iFinDPy 真实安装时 pop 会触发重新导入而不报错）。
+        with mock.patch.dict(sys.modules, {"iFinDPy": None}):
+            with pytest.raises(Exception) as exc_info:
+                mod.IfindAdapter()
         assert "iFinDPy" in str(exc_info.value) or "ifind" in str(exc_info.value).lower()
 
 

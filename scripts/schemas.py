@@ -63,19 +63,23 @@ class PositionSnapshotV1(BaseModel):
 
 
 class ExecutionReportV1(BaseModel):
-    """执行报告（PRD P1-4.1 / 3.4）"""
+    """执行结果出口（PRD P1-4.1 / 3.4）
+
+    对应 execution-monitor-engine run() 返回的 metadata 结构：
+        {
+            "orders_executed": int,
+            "orders_failed": int,
+            "account_snapshot": Dict[str, Any] | None,
+            "mode": "paper" | "live",
+        }
+    """
     model_config = _MODEL_CONFIG
 
     version: Literal["ExecutionReportV1"] = "ExecutionReportV1"
-    execution_id: str
-    trade_date: str
-    orders: List[OrderIntentV1] = Field(default_factory=list)
-    fills: List[Dict[str, Any]] = Field(default_factory=list)
-    nav_after: float
-    cash_after: float
-    positions_after: Dict[str, int] = Field(default_factory=dict)
-    verdict: Literal["confirmed", "rejected"]
-    created_at: datetime
+    orders_executed: int = Field(ge=0)
+    orders_failed: int = Field(ge=0)
+    account_snapshot: Optional[Dict[str, Any]] = None
+    mode: Literal["paper", "live"] = "paper"
 
 
 class RiskLimitV1(BaseModel):

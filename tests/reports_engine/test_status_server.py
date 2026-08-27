@@ -385,8 +385,25 @@ class TestLivePolling:
         assert 'id="status-lamp"' in html
         assert 'id="refresh-countdown"' in html
         assert 'id="sync-btn"' in html
-        assert "LIVE" in html
         assert "xtquant" in html
+
+    @pytest.mark.parametrize(
+        "mode,label",
+        [
+            ("live", "实盘交易"),
+            ("paper", "模拟交易"),
+            ("LIVE", "实盘交易"),
+            ("PAPER", "模拟交易"),
+        ],
+    )
+    def test_render_live_block_shows_chinese_mode_label(self, mode, label):
+        """状态条交易模式应显示中文标签（实盘交易/模拟交易），而非英文 LIVE/PAPER。"""
+        _, polling = _load_status_modules()
+        html = polling.render_live_block(port=8000, poll_interval=5, mode=mode, backend="xtquant")
+        assert f"<strong>{label}</strong>" in html
+        # 不再出现英文大写的 LIVE/PAPER 标签
+        assert "<strong>LIVE</strong>" not in html
+        assert "<strong>PAPER</strong>" not in html
 
     def test_render_live_block_contains_pulse_animation(self):
         """状态条应包含脉冲动画 CSS。"""
