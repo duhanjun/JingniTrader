@@ -55,6 +55,21 @@ def _load_strategy_engine_module():
                   "lightgbm", "catboost", "talib", "pandas_ta"):
         sys.modules.pop(_real, None)
 
+    # mlflow 懒加载守卫（与 test_ic_reuse.py 同源，OPEN-2026-0814-13 既有方案）：
+    # 上一步 pop 掉 mlflow 后重新 import，mlflow 3.x 的 `mlflow.store` 子模块
+    # 不会自动挂回顶层命名空间，导致 ModelEngine() 构造时的
+    # mlflow.set_experiment() → sqlalchemy_store 抛
+    # `AttributeError: module 'mlflow' has no attribute 'store'`。
+    # 修复：显式 import 后手动挂回属性。
+    try:
+        import mlflow as _mlflow
+        import importlib as _importlib
+        _importlib.import_module("mlflow.store")
+        if not hasattr(_mlflow, "store"):
+            _mlflow.store = sys.modules.get("mlflow.store")
+    except Exception:  # pragma: no cover - mlflow 缺失时本就走降级路径
+        pass
+
     try:
         spec = ilu.spec_from_file_location("strategy_model_engine_engine", STRATEGY_ENGINE_PATH)
         mod = ilu.module_from_spec(spec)
@@ -113,6 +128,12 @@ class TestStrategyModelCorePaths:
     def test_train_persists_model_to_disk(self, monkeypatch, tmp_path):
         """train() 须将模型落盘为 .pkl，路径非空且文件存在。"""
         monkeypatch.setenv("QUANT_MODEL_DIR", str(tmp_path))
+        # 强制 random_forest（OPEN-2026-0814-13 既有修复）：本文件撤销了 conftest
+        # 对 sklearn 的 MagicMock，默认 MODEL_TYPE=lightgbm 会走 lightgbm.sklearn，
+        # 其环境探测在「真实 sklearn + 已 pop 的 sys.modules」组合下抛
+        # LightGBMError；且 Windows 原生栈混合加载还可能触发 access violation。
+        # 本用例验证目标是 joblib 模型往返持久化，不是训练器选型。
+        monkeypatch.setenv("MODEL_TYPE", "random_forest")
 
         strategy_mod = _load_strategy_engine_module()
         engine = strategy_mod.ModelEngine()
@@ -129,6 +150,9 @@ class TestStrategyModelCorePaths:
     def test_model_load_roundtrip(self, monkeypatch, tmp_path):
         """joblib.load(model_path) 重建模型，predict 与原模型一致（加载往返）。"""
         monkeypatch.setenv("QUANT_MODEL_DIR", str(tmp_path))
+        # 同 test_train_persists_model_to_disk：强制 random_forest 规避
+        # lightgbm.sklearn 在撤销 sklearn mock 后的 LightGBMError（详见上条注释）。
+        monkeypatch.setenv("MODEL_TYPE", "random_forest")
 
         strategy_mod = _load_strategy_engine_module()
         engine = strategy_mod.ModelEngine()

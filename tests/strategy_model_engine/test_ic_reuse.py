@@ -49,6 +49,23 @@ def _load_strategy_engine_module():
                   "lightgbm", "catboost", "talib", "pandas_ta"):
         sys.modules.pop(_real, None)
 
+    # mlflow 懒加载守卫（沿用 OPEN-2026-0814-13 既有方案）：
+    # 上面 pop 掉 mlflow 后重新 import，mlflow 3.x 的 `mlflow.store` 子模块
+    # 不会自动挂回顶层命名空间，导致后续 mlflow.set_experiment() →
+    # sqlalchemy_store 报 `AttributeError: module 'mlflow' has no attribute 'store'`。
+    # 该现象只在「本文件在别的测试之后运行」时出现（此时 mlflow 已被前述测试
+    # 导入过，pop 后残留部分初始化状态），单跑本文件则不复现。
+    # 修复：显式 import 后手动挂回属性，与 strategy-model-engine/engine.py
+    # 内的 mlflow 导入守卫保持一致。
+    try:
+        import mlflow as _mlflow
+        import importlib as _importlib
+        _importlib.import_module("mlflow.store")
+        if not hasattr(_mlflow, "store"):
+            _mlflow.store = sys.modules.get("mlflow.store")
+    except Exception:  # pragma: no cover - mlflow 缺失时本就走降级路径
+        pass
+
     try:
         spec = ilu.spec_from_file_location("strategy_model_engine_engine", STRATEGY_ENGINE_PATH)
         mod = ilu.module_from_spec(spec)
@@ -135,6 +152,12 @@ class TestICReuse:
     def test_train_ic_finite_and_in_range(self, monkeypatch, tmp_path):
         """train() 在提供 test_dates（仅测试行索引）时产出的 IC 有限且落在 [-1,1]。"""
         monkeypatch.setenv("QUANT_MODEL_DIR", str(tmp_path))
+        # 强制 random_forest（沿用 test_model_persistence.py 的既有约定）：
+        # 本用例撤销了 sklearn 的 MagicMock 以验证真实 IC 计算，此时若沿用默认
+        # MODEL_TYPE=lightgbm，lightgbm.sklearn 在真实 sklearn 环境下会抛
+        # LightGBMError（其自身环境探测依赖被 mock 的 sys.modules 状态）。
+        # 本用例验证目标是 IC 计算口径，不是训练器选型，故固定为 random_forest。
+        monkeypatch.setenv("MODEL_TYPE", "random_forest")
         mod = _load_strategy_engine_module()
         engine = mod.ModelEngine()
 

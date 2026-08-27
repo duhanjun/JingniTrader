@@ -20,6 +20,13 @@ import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# 归入 heavy 批次以进程隔离运行，默认安全子集跳过（OPEN-2026-0814-13 原生 SDK 共存问题）。
+# 本目录用例真实拉起多阶段管线，会触发 mlflow / 原生扩展共存导致的挂起或段错误，
+# 故统一标记 heavy，由 CI 的 heavy-regression job 按目录分批单进程执行。
+pytestmark = [
+    pytest.mark.heavy,
+]
+
 
 def _run_pipeline_helper(work_dir, enable_alphalens=False, target_stages=None):
     """复用最小回测链路跑一次 pipeline（模块级共享函数）。

@@ -15,9 +15,10 @@ tags:
 dependencies:
   - pandas>=2.0.0
   - numpy>=1.24.0
-  - sqlalchemy>=2.0.0
+  - pydantic>=2.0.0  # paper_ledger.py 账本记录校验（PaperTradeRecordV1）
   - xtquant (可选)
   - gm (可选)
+  - tqcenter (可选)
 environment_variables:
   - name: TRADE_MODE
     description: 交易模式（paper / live）
