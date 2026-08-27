@@ -460,6 +460,15 @@ python engine.py -i "用 wind 取数据，分析 000001.SZ 平安银行"
   <p><em>微信扫一扫 / 搜索「杜哥学量化」</em></p>
 </div>
 
+## 开发参与
+
+- **本地测试必须用目录分批**：裸跑 `pytest tests`（全量）会稳定触发
+  `access violation`（原生扩展线程竞态，约 69% 处崩溃）；
+  按目录分批 + 单进程 + 单线程 BLAS/OpenMP 则 909 passed / 0 failed / 0 crash。
+  具体命令与原因见 [CONTRIBUTING.md](./CONTRIBUTING.md#1-本地测试必须用目录分批禁止依赖全量-pytest)。
+- 其他开发约定（提交前检查、单一权威源与同步方向、代码风格、安全纪律）同样见
+  [CONTRIBUTING.md](./CONTRIBUTING.md)。
+
 ## 许可证
 
 本项目采用 [MIT License](./LICENSE) 开源。你可以自由使用、复制、修改和分发本项目，但需要保留原始版权声明和许可证文本。
