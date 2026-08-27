@@ -64,6 +64,13 @@ _reports_e2e/
 _e2e_workdir/
 _repro_*.py
 
+# 外部测试运行器的临时目录（pytest tmp_path 残留，运行时生成，不入库）
+.pt_cleanup/
+
+# CodeBuddy IDE 自动生成的 AI 上下文目录（memory/ + rules/，非运行代码，不入库）
+# 注：CODEBUDDY.md 单文件已在下方忽略，此为其目录形态
+.codebuddy/
+
 # 崩溃转储与 mlflow 运行产物（原生 SDK 段错误/实验日志，不入库）
 *.dmp
 mlruns/
