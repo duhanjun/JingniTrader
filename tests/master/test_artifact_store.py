@@ -11,11 +11,11 @@
 兼容性：
 - 旧产物（无 manifest）读取时只 warning，不 raise
 """
+
 from __future__ import annotations
 
 import json
 import os
-import shutil
 
 import pytest
 
@@ -23,6 +23,7 @@ import pytest
 # ============================================================================
 # 用例 1: compute_sha256
 # ============================================================================
+
 
 class TestComputeSha256:
     def test_sha256_correct_for_known_content(self, tmp_path):
@@ -57,12 +58,14 @@ class TestComputeSha256:
     def test_sha256_missing_file_raises(self, tmp_path):
         """文件不存在 raise FileNotFoundError"""
         from scripts.artifact_store import compute_sha256
+
         with pytest.raises(FileNotFoundError):
             compute_sha256(str(tmp_path / "nonexistent.txt"))
 
     def test_sha256_directory_raises(self, tmp_path):
         """路径是目录 raise IsADirectoryError"""
         from scripts.artifact_store import compute_sha256
+
         sub = tmp_path / "subdir"
         sub.mkdir()
         with pytest.raises(IsADirectoryError):
@@ -72,6 +75,7 @@ class TestComputeSha256:
 # ============================================================================
 # 用例 2: write_artifact / read_artifact 往返 + manifest 结构
 # ============================================================================
+
 
 class TestWriteReadArtifact:
     def test_roundtrip_data_and_manifest(self, tmp_path):
@@ -89,7 +93,7 @@ class TestWriteReadArtifact:
         assert os.path.isfile(manifest_path)
 
         # manifest 结构校验（PRD P1-3.2）
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
         assert manifest["name"] == "backtest_result"
         assert manifest["version"] == "V1"
@@ -123,6 +127,7 @@ class TestWriteReadArtifact:
 # 用例 3: inputs 血缘追踪
 # ============================================================================
 
+
 class TestInputsLineage:
     def test_inputs_recorded_in_manifest(self, tmp_path):
         """write_artifact 把 inputs 路径的 sha256 记入 manifest.inputs"""
@@ -140,7 +145,7 @@ class TestInputsLineage:
 
         # 写下游产物
         output_dir = str(tmp_path / "out")
-        path = write_artifact(
+        write_artifact(
             "downstream",
             {"result": "ok"},
             output_dir,
@@ -163,7 +168,7 @@ class TestInputsLineage:
         from scripts.artifact_store import write_artifact, read_artifact
 
         output_dir = str(tmp_path / "out")
-        path = write_artifact(
+        write_artifact(
             "downstream",
             {"x": 1},
             output_dir,
@@ -179,6 +184,7 @@ class TestInputsLineage:
 # ============================================================================
 # 用例 4: read_artifact sha256 不匹配 raise
 # ============================================================================
+
 
 class TestSha256Mismatch:
     def test_tampered_artifact_raises(self, tmp_path):
@@ -200,6 +206,7 @@ class TestSha256Mismatch:
 # ============================================================================
 # 用例 5: generate_run_manifest
 # ============================================================================
+
 
 class TestRunManifest:
     def test_generate_run_manifest_structure(self, tmp_path):
@@ -249,6 +256,7 @@ class TestRunManifest:
     def test_load_run_manifest_missing_raises(self, tmp_path):
         """run_manifest.json 不存在时 load_run_manifest raise FileNotFoundError"""
         from scripts.artifact_store import load_run_manifest
+
         with pytest.raises(FileNotFoundError):
             load_run_manifest(str(tmp_path))
 
@@ -257,6 +265,7 @@ class TestRunManifest:
 # 用例 6: replay_check 对比两次 run
 # ============================================================================
 
+
 class TestReplayCheck:
     def test_identical_runs_no_diffs(self, tmp_path):
         """两次 run 完全一致 → inputs_identical=True, outputs_identical=True"""
@@ -264,12 +273,14 @@ class TestReplayCheck:
         from scripts.replay_check import compare_runs, format_report
 
         # 两次 run 用相同的 manifest
-        stages = [{
-            "name": "DATA",
-            "status": "success",
-            "latency_sec": 1.0,
-            "artifacts": [{"name": "data.json", "sha256": "same_sha"}],
-        }]
+        stages = [
+            {
+                "name": "DATA",
+                "status": "success",
+                "latency_sec": 1.0,
+                "artifacts": [{"name": "data.json", "sha256": "same_sha"}],
+            }
+        ]
         inputs_sha = {"DATA": "same_input_sha"}
 
         for run_id in ("run_a", "run_b"):
@@ -299,25 +310,32 @@ class TestReplayCheck:
         inputs_sha = {"DATA": "same_input_sha"}
         # run_a 输出 sha=aaa
         # run_b 输出 sha=bbb
-        stages_a = [{
-            "name": "DATA",
-            "status": "success",
-            "latency_sec": 1.0,
-            "artifacts": [{"name": "data.json", "sha256": "aaa"}],
-        }]
-        stages_b = [{
-            "name": "DATA",
-            "status": "success",
-            "latency_sec": 1.0,
-            "artifacts": [{"name": "data.json", "sha256": "bbb"}],
-        }]
+        stages_a = [
+            {
+                "name": "DATA",
+                "status": "success",
+                "latency_sec": 1.0,
+                "artifacts": [{"name": "data.json", "sha256": "aaa"}],
+            }
+        ]
+        stages_b = [
+            {
+                "name": "DATA",
+                "status": "success",
+                "latency_sec": 1.0,
+                "artifacts": [{"name": "data.json", "sha256": "bbb"}],
+            }
+        ]
         for run_id, stages in (("run_a", stages_a), ("run_b", stages_b)):
             run_dir = str(tmp_path / run_id)
             os.makedirs(run_dir, exist_ok=True)
             generate_run_manifest(
-                run_dir=run_dir, run_id=run_id,
-                start_at="2026-08-02T10:00:00", end_at="2026-08-02T10:01:00",
-                stages=stages, inputs_sha256=inputs_sha,
+                run_dir=run_dir,
+                run_id=run_id,
+                start_at="2026-08-02T10:00:00",
+                end_at="2026-08-02T10:01:00",
+                stages=stages,
+                inputs_sha256=inputs_sha,
             )
 
         report = compare_runs(str(tmp_path / "run_a"), str(tmp_path / "run_b"))
@@ -345,9 +363,12 @@ class TestReplayCheck:
             run_dir = str(tmp_path / run_id)
             os.makedirs(run_dir, exist_ok=True)
             generate_run_manifest(
-                run_dir=run_dir, run_id=run_id,
-                start_at="2026-08-02T10:00:00", end_at="2026-08-02T10:01:00",
-                stages=stages, inputs_sha256={},
+                run_dir=run_dir,
+                run_id=run_id,
+                start_at="2026-08-02T10:00:00",
+                end_at="2026-08-02T10:01:00",
+                stages=stages,
+                inputs_sha256={},
             )
 
         report = compare_runs(str(tmp_path / "run_a"), str(tmp_path / "run_b"))
@@ -358,6 +379,7 @@ class TestReplayCheck:
 # ============================================================================
 # 用例 7: RunArchiver 集成（sidecar manifest + run_manifest.json）
 # ============================================================================
+
 
 class TestRunArchiverIntegration:
     def test_save_artifact_copy_generates_sidecar_manifest(self, tmp_path):
@@ -380,7 +402,7 @@ class TestRunArchiverIntegration:
         manifest_path = dest_path + ".manifest.json"
         assert os.path.isfile(manifest_path)
 
-        with open(manifest_path, "r", encoding="utf-8") as f:
+        with open(manifest_path, encoding="utf-8") as f:
             manifest = json.load(f)
         assert manifest["name"] == "source.json"
         assert manifest["version"] == "V1"

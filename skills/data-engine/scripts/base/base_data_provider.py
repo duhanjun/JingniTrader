@@ -2,8 +2,9 @@
 数据提供者抽象基类
 所有数据源适配器必须实现此接口
 """
+
 from abc import ABC, abstractmethod
-from typing import List, Optional, Set
+from typing import List, Set
 import pandas as pd
 
 
@@ -38,24 +39,14 @@ class BaseDataProvider(ABC):
         if not meta:
             raise NotImplementedError(f"未知数据类型: {data_type}")
         if not self.supports(data_type):
-            raise NotImplementedError(
-                f"{self.__class__.__name__} 不支持数据类型 {data_type}"
-            )
+            raise NotImplementedError(f"{self.__class__.__name__} 不支持数据类型 {data_type}")
         method = getattr(self, meta.method_name, None)
         if method is None:
-            raise NotImplementedError(
-                f"{self.__class__.__name__} 未实现 {meta.method_name}"
-            )
+            raise NotImplementedError(f"{self.__class__.__name__} 未实现 {meta.method_name}")
         return method(**kwargs)
 
     @abstractmethod
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         """
         获取日线行情数据
 
@@ -73,6 +64,46 @@ class BaseDataProvider(ABC):
         """
         ...
 
+    def get_kline(
+        self,
+        symbols: List[str],
+        period: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """
+        获取任意周期 K 线行情（REQ-2026-08-15 行情全粒度接入）。
+
+        默认 period="day" 时映射到 get_daily（向后兼容，不破坏现有调用）。
+        子类可覆盖以支持更多周期（分钟/周/月/季/年），并将底层数据归一化到
+        标准化 K 线契约（code/date/open/high/low/close/volume/amount）。
+
+        参数:
+            symbols: 股票代码列表，如 ['000001.SZ', '600000.SH']
+            period: K 线周期，取值见 data_types.KLINE_PERIODS
+                    （m1/m5/m15/m30/m60/m120/day/week/month/season/year）
+            start_date: 开始日期 YYYYMMDD 或 YYYY-MM-DD（'' = 不裁剪）
+            end_date: 结束日期（'' = 不裁剪）
+            adjust: 复权方式 'qfq'(前复权), 'hfq'(后复权), ''(不复权)
+
+        返回:
+            DataFrame，标准化 K 线契约列：
+            code, date, open, high, low, close, volume, amount
+
+        未实现的周期由子类抛 InvalidParameterError（由降级链路由到其他支持该周期的源）。
+        """
+        # 向后兼容：day 直接复用 get_daily 路径
+        if period in ("day", ""):
+            return self.get_daily(symbols, start_date, end_date, adjust=adjust)
+        # 非 day 周期：基类默认不支持，交由子类覆盖实现
+        from scripts.errors import InvalidParameterError
+
+        raise InvalidParameterError(
+            self.__class__.__name__,
+            f"{self.__class__.__name__} 未实现周期 {period} 的 get_kline（day 已映射到 get_daily；其他周期需子类覆盖）",
+        )
+
     @abstractmethod
     def get_stock_list(self) -> pd.DataFrame:
         """
@@ -84,12 +115,7 @@ class BaseDataProvider(ABC):
         ...
 
     @abstractmethod
-    def get_adj_factor(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str
-    ) -> pd.DataFrame:
+    def get_adj_factor(self, symbols: List[str], start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取复权因子
 
@@ -99,12 +125,7 @@ class BaseDataProvider(ABC):
         ...
 
     @abstractmethod
-    def get_financial(
-        self,
-        symbols: List[str],
-        report_date: str,
-        fields: List[str]
-    ) -> pd.DataFrame:
+    def get_financial(self, symbols: List[str], report_date: str, fields: List[str]) -> pd.DataFrame:
         """
         获取财务数据
 

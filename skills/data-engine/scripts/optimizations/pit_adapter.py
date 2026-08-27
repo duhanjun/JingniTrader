@@ -5,8 +5,8 @@ PIT (Point-in-Time) 数据适配器实现
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
+from typing import List, Union
 
 import numpy as np
 import pandas as pd
@@ -30,8 +30,8 @@ class PITField:
 
     name: str
     value_col: str
-    announce_col: Optional[str] = None
-    fallback_delay: Optional[int] = None  # 单位: 天
+    announce_col: str | None = None
+    fallback_delay: int | None = None  # 单位: 天
 
 
 class PITDataAdapter:

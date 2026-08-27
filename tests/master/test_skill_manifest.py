@@ -79,9 +79,26 @@ class TestSkillManifestFrontmatter:
             return f.read()
 
     def test_frontmatter_has_name_and_entry_point(self, skill_md):
-        """frontmatter 必须声明 name 与 entry_point=engine.py。"""
+        """frontmatter 必须声明 name 与 entry_point=engine.py。
+
+        说明：entry_point 位于 metadata.jingni.runtime 嵌套层级（缩进 6 空格，非顶层），
+        由提交 c52ce2903 有意归入 runtime 段——与同级 language / python_version /
+        environment_variables 语义一致，属正确的 YAML 嵌套。故此处按 YAML 结构断言
+        嵌套路径，而非用行首锚定正则（会因缩进层级变化而误报）。
+        """
         assert re.search(r"^name:\s*jingni-trader\s*$", skill_md, re.M), "SKILL.md 缺少 name: jingni-trader"
-        assert re.search(r"^entry_point:\s*engine\.py\s*$", skill_md, re.M), "SKILL.md 缺少 entry_point: engine.py"
+
+        # 解析 frontmatter 并按嵌套路径取值（yaml 为本文件既有依赖，见下方 skill-sync.yml 解析）
+        import yaml
+
+        raw = skill_md.split("\n---", 1)[0]
+        if raw.startswith("---"):
+            raw = raw[3:]
+        front = yaml.safe_load(raw) or {}
+        runtime = ((front.get("metadata") or {}).get("jingni") or {}).get("runtime") or {}
+        assert runtime.get("entry_point") == "engine.py", (
+            "SKILL.md 的 metadata.jingni.runtime.entry_point 缺失或不为 engine.py"
+        )
 
     def test_allowed_sub_skills_match_directories(self, skill_md):
         """SKILL.md 的 allowed_sub_skills 必须与 skills/ 下实际引擎目录一致。"""

@@ -19,12 +19,13 @@
     说明：Wind 的 PriceAdj 命名与 jingni-trader 的 adjust 参数语义相反，
          此处做显式映射，避免混淆。
 """
+
 import logging
-from typing import List, Optional
+from typing import List
 import pandas as pd
 
-from ..base.base_data_provider import BaseDataProvider
-from ..errors import DataSourceError, NetworkError, DataNotFoundError, InvalidParameterError
+from scripts.base.base_data_provider import BaseDataProvider
+from scripts.errors import DataSourceError, NetworkError, InvalidParameterError
 
 
 logger = logging.getLogger("wind-adapter")
@@ -35,8 +36,8 @@ logger = logging.getLogger("wind-adapter")
 #       jingni-trader 中 "hfq"=后复权, "qfq"=前复权
 # 映射时必须显式翻转，防止误用
 _ADJUST_MAP = {
-    "hfq": "B",   # 后复权
-    "qfq": "F",   # 前复权
+    "hfq": "B",  # 后复权
+    "qfq": "F",  # 前复权
     "none": "U",  # 不复权
     "": "U",
 }
@@ -51,11 +52,25 @@ _SUPPORTED_SUFFIX = {".SH", ".SZ", ".CFE", ".SHF", ".CZC", ".DCE", ".INE"}
 def _finalize(df: pd.DataFrame) -> pd.DataFrame:
     """把 Wind 返回的裸行情统一成下游期望的标准 schema。"""
     if df is None or len(df) == 0:
-        return pd.DataFrame(columns=[
-            "code", "date", "open", "high", "low", "close", "volume", "amount",
-            "pre_close", "change_pct", "turnover_rate",
-            "is_st", "is_limit_up", "is_limit_down", "listed_days"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "code",
+                "date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "pre_close",
+                "change_pct",
+                "turnover_rate",
+                "is_st",
+                "is_limit_up",
+                "is_limit_down",
+                "listed_days",
+            ]
+        )
     if "vol" in df.columns and "volume" not in df.columns:
         df = df.rename(columns={"vol": "volume"})
     if "amt" in df.columns and "amount" not in df.columns:
@@ -71,9 +86,23 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
     df["is_st"] = df["is_st"].fillna(False)
     df["is_limit_up"] = df["is_limit_up"].fillna(False)
     df["is_limit_down"] = df["is_limit_down"].fillna(False)
-    cols = ["code", "date", "open", "high", "low", "close", "volume", "amount",
-            "pre_close", "change_pct", "turnover_rate",
-            "is_st", "is_limit_up", "is_limit_down", "listed_days"]
+    cols = [
+        "code",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "pre_close",
+        "change_pct",
+        "turnover_rate",
+        "is_st",
+        "is_limit_up",
+        "is_limit_down",
+        "listed_days",
+    ]
     return df.sort_values(["code", "date"]).reset_index(drop=True)[cols]
 
 
@@ -88,14 +117,13 @@ class WindAdapter(BaseDataProvider):
     def __init__(self):
         try:
             from WindPy import w
+
             self.w = w
             self._connected = False
             self._connect()
         except ImportError as e:
             raise DataSourceError(
-                "wind",
-                f"WindPy 包未安装或 Wind 终端未启动: {e}。"
-                f"请先安装 Wind 金融终端并配置 WindPy。"
+                "wind", f"WindPy 包未安装或 Wind 终端未启动: {e}。请先安装 Wind 金融终端并配置 WindPy。"
             ) from e
 
     def _connect(self):
@@ -108,10 +136,7 @@ class WindAdapter(BaseDataProvider):
                 return
             data = self.w.start()
             if data.ErrorCode:
-                raise NetworkError(
-                    "wind",
-                    f"WindPy 连接失败，错误码: {data.ErrorCode}"
-                )
+                raise NetworkError("wind", f"WindPy 连接失败，错误码: {data.ErrorCode}")
             self._connected = True
             logger.info("WindPy 连接成功")
         except DataSourceError:
@@ -136,18 +161,9 @@ class WindAdapter(BaseDataProvider):
     def _validate_symbol(symbol: str):
         """校验代码格式，Wind 接受 {6位数字}.{SH/SZ/...}。"""
         if not any(symbol.endswith(suf) for suf in _SUPPORTED_SUFFIX):
-            raise InvalidParameterError(
-                "wind",
-                f"不支持的代码格式: {symbol}，应为 XXXXXX.SH/.SZ 等"
-            )
+            raise InvalidParameterError("wind", f"不支持的代码格式: {symbol}，应为 XXXXXX.SH/.SZ 等")
 
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         """获取日线行情。
 
         使用 w.wsd 批量查询，fields 取 open/high/low/close/volume/amt/oi。
@@ -177,10 +193,7 @@ class WindAdapter(BaseDataProvider):
 
             if error:
                 # ErrorCode 非 0 视为失败
-                raise DataSourceError(
-                    "wind",
-                    f"wsd 查询 {symbol} 失败，错误码: {error}"
-                )
+                raise DataSourceError("wind", f"wsd 查询 {symbol} 失败，错误码: {error}")
             if df is None or len(df) == 0:
                 logger.warning("Wind 未返回 %s 的数据", symbol)
                 continue
@@ -226,9 +239,7 @@ class WindAdapter(BaseDataProvider):
         out["name"] = df.get("sec_name", df.iloc[:, 1] if df.shape[1] > 1 else None)
         out["list_date"] = df.get("list_date", None)
         if out["list_date"] is not None:
-            out["list_date"] = pd.to_datetime(
-                out["list_date"].astype(str), format="%Y%m%d", errors="coerce"
-            )
+            out["list_date"] = pd.to_datetime(out["list_date"].astype(str), format="%Y%m%d", errors="coerce")
         out["industry"] = None  # Wind 行业需另行调用 wss，此处留空
         out["is_st"] = out["name"].astype(str).str.contains("ST", na=False)
         return out
@@ -247,11 +258,24 @@ class WindAdapter(BaseDataProvider):
         """
         self._ensure_connected()
         standard_cols = [
-            "code", "report_date", "pe_ttm", "pb", "ps_ttm", "dv_ratio",
-            "roe", "roa", "gross_margin", "net_margin",
-            "revenue_growth", "profit_growth",
-            "debt_ratio", "current_ratio", "quick_ratio", "ocf",
-            "industry", "name",
+            "code",
+            "report_date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ratio",
+            "roe",
+            "roa",
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+            "industry",
+            "name",
         ]
         if not symbols:
             return pd.DataFrame(columns=standard_cols)
@@ -289,8 +313,16 @@ class WindAdapter(BaseDataProvider):
         out["dv_ratio"] = df.get("dv_ratio")
         out["roe"] = df.get("roe")
         out["roa"] = df.get("roa")
-        for c in ["gross_margin", "net_margin", "revenue_growth", "profit_growth",
-                  "debt_ratio", "current_ratio", "quick_ratio", "ocf"]:
+        for c in [
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+        ]:
             out[c] = None
         out["industry"] = df.get("industry")
         out["name"] = df.get("sec_name")

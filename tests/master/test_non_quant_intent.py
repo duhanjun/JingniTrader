@@ -11,14 +11,23 @@
 - 分析路径下 ctx.metadata["report_template"] 被正确设置
 - ctx.metadata["strategy_required"] 布尔标志正确传递
 """
+
 from __future__ import annotations
 
 import pytest
+
+# 本文件导入主调度器 engine（cvxpy/pypfopt 原生扩展），归入 heavy 批次以进程隔离运行，
+# 默认安全子集跳过，避免 Windows 原生栈同进程加载竞态段错误（OPEN-2026-0814-13）。
+pytestmark = [
+    pytest.mark.heavy,
+    pytest.mark.requires_sklearn,
+]
 
 
 # ============================================================================
 # Part 1: 关键字常量契约
 # ============================================================================
+
 
 class TestStrategyKeywordsConstant:
     """验证 STRATEGY_KEYWORDS 常量存在并包含预期关键字。"""
@@ -28,6 +37,7 @@ class TestStrategyKeywordsConstant:
     def test_constant_exists(self):
         """STRATEGY_KEYWORDS 在 engine 模块中可访问"""
         import engine
+
         assert hasattr(engine, "STRATEGY_KEYWORDS")
         assert isinstance(engine.STRATEGY_KEYWORDS, (set, list, tuple))
 
@@ -36,6 +46,7 @@ class TestStrategyKeywordsConstant:
     def test_contains_expected_keywords(self):
         """STRATEGY_KEYWORDS 包含策略构建动作关键字"""
         import engine
+
         expected = {"回测", "策略", "模型", "组合", "实盘", "选股"}
         missing = expected - set(engine.STRATEGY_KEYWORDS)
         assert not missing, f"STRATEGY_KEYWORDS 缺少: {missing}"
@@ -45,6 +56,7 @@ class TestStrategyKeywordsConstant:
     def test_excludes_factor_analysis_keywords(self):
         """STRATEGY_KEYWORDS 不应包含因子/分析类关键词（这些是两条路径共用的）"""
         import engine
+
         # '因子'、'alpha'、'ic' 属于因子分析范畴，不应触发策略路径
         non_strategy = {"因子", "alpha", "ic"}
         leaked = non_strategy & set(engine.STRATEGY_KEYWORDS)
@@ -55,11 +67,13 @@ class TestStrategyKeywordsConstant:
 # Part 2: _is_strategy_required 判定逻辑
 # ============================================================================
 
+
 class TestIsStrategyRequired:
     """验证 _is_strategy_required 对各种输入的判定。"""
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     @pytest.mark.skill_master
@@ -151,11 +165,13 @@ class TestIsStrategyRequired:
 # Part 3: parse_intent 在分析路径下的副作用
 # ============================================================================
 
+
 class TestAnalysisIntentRouting:
     """验证 parse_intent 在分析路径下正确设置 target_stages 与 metadata。"""
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     @pytest.mark.skill_master
@@ -206,9 +222,7 @@ class TestAnalysisIntentRouting:
         master = self._make_engine()
         ctx = master.parse_intent("帮我做回测")
         assert ctx.metadata["strategy_required"] is True
-        assert ctx.target_stages == [
-            "DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"
-        ]
+        assert ctx.target_stages == ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"]
 
 
 if __name__ == "__main__":

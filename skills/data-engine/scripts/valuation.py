@@ -2,9 +2,10 @@
 估值分位计算模块
 计算个股PE/PB/PS等估值指标在历史区间中的分位数
 """
+
 import pandas as pd
 import numpy as np
-from typing import Dict, Optional, List
+from typing import Dict, List
 import logging
 
 logger = logging.getLogger("valuation")
@@ -56,9 +57,7 @@ def _verdict_from_percentile(percentile: float) -> str:
 class ValuationAnalyzer:
     """个股估值分位分析"""
 
-    def calculate_percentile(self, stock_code: str, metric: str,
-                             historical_data: pd.DataFrame,
-                             years: int = 5) -> Dict:
+    def calculate_percentile(self, stock_code: str, metric: str, historical_data: pd.DataFrame, years: int = 5) -> Dict:
         """
         计算当前估值指标在历史N年中的分位数
 
@@ -153,9 +152,9 @@ class ValuationAnalyzer:
             "samples": int(values.size),
         }
 
-    def batch_percentile(self, stock_codes: List[str], metric: str,
-                         historical_data: pd.DataFrame,
-                         years: int = 5) -> pd.DataFrame:
+    def batch_percentile(
+        self, stock_codes: List[str], metric: str, historical_data: pd.DataFrame, years: int = 5
+    ) -> pd.DataFrame:
         """批量计算多只股票的估值分位
 
         返回按分位升序排列的 DataFrame（最被低估的在前）。
@@ -172,9 +171,7 @@ class ValuationAnalyzer:
             df = df.sort_values("percentile", ascending=True, na_position="last")
         return df.reset_index(drop=True)
 
-    def compare_valuation(self, stock_code: str,
-                          historical_data: pd.DataFrame,
-                          metrics: List[str] = None) -> Dict:
+    def compare_valuation(self, stock_code: str, historical_data: pd.DataFrame, metrics: List[str] = None) -> Dict:
         """
         综合估值分析：同时计算PE/PB/PS/股息率分位
 
@@ -220,10 +217,7 @@ class ValuationAnalyzer:
             # 估值得分：越高越被低估
             #   PE/PB/PS 越低越被低估 => 得分 = 100 - 分位
             #   股息率 越高越被低估 => 得分 = 分位
-            if m in _HIGHER_IS_BETTER:
-                score_m = r["percentile"]
-            else:
-                score_m = 100.0 - r["percentile"]
+            score_m = r["percentile"] if m in _HIGHER_IS_BETTER else 100.0 - r["percentile"]
             scores.append(score_m)
 
         if not scores:

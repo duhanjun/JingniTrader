@@ -2,8 +2,9 @@
 数据源适配器基类（工厂模式）
 用于统一创建不同数据源适配器实例
 """
+
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import List
 import pandas as pd
 
 
@@ -52,13 +53,7 @@ class BaseDataSource(ABC):
         ...
 
     @abstractmethod
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         """
         获取日线行情
 

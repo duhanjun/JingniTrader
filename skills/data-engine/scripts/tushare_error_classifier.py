@@ -7,8 +7,9 @@ Tushare 错误分类器
 - NetworkError        → 网络问题，可重试或切下一个源
 - InvalidParameterError → 参数错误，不切换
 """
+from __future__ import annotations
+
 import re
-from typing import Optional
 from .errors import QuotaExceededError, RateLimitError, NetworkError, InvalidParameterError, DataSourceError
 
 
@@ -70,7 +71,7 @@ _NETWORK_PATTERNS = [
 ]
 
 
-def _extract_retry_seconds(message: str) -> Optional[int]:
+def _extract_retry_seconds(message: str) -> int | None:
     """从限频消息中提取建议等待秒数"""
     # 1次/小时 -> 3600
     m = re.search(r"(\d+)\s*次/小时", message)

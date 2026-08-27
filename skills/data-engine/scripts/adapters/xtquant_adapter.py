@@ -12,12 +12,13 @@
     qfq -> 'front'（前复权）
     none-> 'none'（不复权）
 """
+
 import logging
-from typing import List, Optional
+from typing import List
 import pandas as pd
 
-from ..base.base_data_provider import BaseDataProvider
-from ..errors import DataSourceError
+from scripts.base.base_data_provider import BaseDataProvider
+from scripts.errors import DataSourceError
 
 
 logger = logging.getLogger("xtquant-adapter")
@@ -28,11 +29,25 @@ _DIVIDEND_MAP = {"hfq": "back", "qfq": "front", "none": "none", "": "none"}
 def _finalize(df: pd.DataFrame) -> pd.DataFrame:
     """把各适配器返回的裸行情统一成下游期望的标准 schema。"""
     if df is None or len(df) == 0:
-        return pd.DataFrame(columns=[
-            "code", "date", "open", "high", "low", "close", "volume", "amount",
-            "pre_close", "change_pct", "turnover_rate",
-            "is_st", "is_limit_up", "is_limit_down", "listed_days"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "code",
+                "date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "pre_close",
+                "change_pct",
+                "turnover_rate",
+                "is_st",
+                "is_limit_up",
+                "is_limit_down",
+                "listed_days",
+            ]
+        )
     if "vol" in df.columns and "volume" not in df.columns:
         df = df.rename(columns={"vol": "volume"})
     df["date"] = pd.to_datetime(df["date"])
@@ -46,42 +61,49 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
     df["is_st"] = df["is_st"].fillna(False)
     df["is_limit_up"] = df["is_limit_up"].fillna(False)
     df["is_limit_down"] = df["is_limit_down"].fillna(False)
-    cols = ["code", "date", "open", "high", "low", "close", "volume", "amount",
-            "pre_close", "change_pct", "turnover_rate",
-            "is_st", "is_limit_up", "is_limit_down", "listed_days"]
+    cols = [
+        "code",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "pre_close",
+        "change_pct",
+        "turnover_rate",
+        "is_st",
+        "is_limit_up",
+        "is_limit_down",
+        "listed_days",
+    ]
     return df.sort_values(["code", "date"]).reset_index(drop=True)[cols]
 
 
 class XtQuantAdapter(BaseDataProvider):
     """迅投 xtquant (QMT) 适配器：连接本地 QMT 数据服务拉取真实行情。"""
 
-    SUPPORTED_DATA_TYPES = {"daily", "financial"}
+    # 实测确认（REQ-2026-0816-source-capability-verify，锚点 600519）：
+    # get_stock_list✅(5209行,QMT已连) / get_daily✅ / get_kline(day,基类映射到 get_daily)✅ /
+    # get_financial✅ / get_adj_factor 返回空DF(xtdata 复权内置 dividend_type)。
+    SUPPORTED_DATA_TYPES = {"daily", "financial", "basic_stock_list", "market_kline"}
 
     def __init__(self):
         try:
             from xtquant import xtdata
+
             self.xtdata = xtdata
             self.available = True
         except ImportError as e:
-            logger.warning(
-                "xtquant 包未安装或 QMT 客户端未启动，XtQuantAdapter 不可用: %s", e
-            )
+            logger.warning("xtquant 包未安装或 QMT 客户端未启动，XtQuantAdapter 不可用: %s", e)
             self.available = False
 
     def _check_available(self):
         if not self.available:
-            raise DataSourceError(
-                "xtquant",
-                "xtquant 包未安装或 QMT 客户端未启动，请先部署环境并登录 QMT"
-            )
+            raise DataSourceError("xtquant", "xtquant 包未安装或 QMT 客户端未启动，请先部署环境并登录 QMT")
 
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         self._check_available()
         xtdata = self.xtdata
         xtdata.connect()
@@ -99,9 +121,7 @@ class XtQuantAdapter(BaseDataProvider):
                 logger.warning("xtdata 下载 %s 历史数据失败（继续尝试读取）: %s", code, e)
             try:
                 raw = xtdata.get_market_data_ex(
-                    field_list, [code], period="1d",
-                    start_time=sd, end_time=ed,
-                    dividend_type=dividend_type
+                    field_list, [code], period="1d", start_time=sd, end_time=ed, dividend_type=dividend_type
                 )
             except Exception as e:
                 raise DataSourceError("xtquant", f"获取 {code} 行情失败: {e}") from e
@@ -167,27 +187,40 @@ class XtQuantAdapter(BaseDataProvider):
         xtdata = self.xtdata
 
         standard_cols = [
-            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
-            'roe', 'roa', 'gross_margin', 'net_margin',
-            'revenue_growth', 'profit_growth',
-            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name',
+            "code",
+            "report_date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ratio",
+            "roe",
+            "roa",
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+            "industry",
+            "name",
         ]
 
         # 标准化报告期: '2024-09-30' -> '20240930'
-        period = report_date.replace('-', '')
+        period = report_date.replace("-", "")
 
         rows = []
         for code in symbols:
-            row = {col: None for col in standard_cols}
-            row['code'] = code
-            row['report_date'] = period
+            row = dict.fromkeys(standard_cols)
+            row["code"] = code
+            row["report_date"] = period
 
             # 股票名称: get_instrument_detail 返回 InstrumentName 字段
             try:
                 det = xtdata.get_instrument_detail(code)
                 if det and isinstance(det, dict):
-                    row['name'] = det.get('InstrumentName') or None
+                    row["name"] = det.get("InstrumentName") or None
             except Exception as e:
                 logger.debug("xtdata 获取 %s 名称失败: %s", code, e)
 
@@ -197,7 +230,7 @@ class XtQuantAdapter(BaseDataProvider):
 
         # 如果调用方指定了 fields，按需过滤列（code/report_date 始终保留）
         if fields:
-            keep = ['code', 'report_date'] + [f for f in fields if f in standard_cols]
+            keep = ["code", "report_date"] + [f for f in fields if f in standard_cols]
             keep = list(dict.fromkeys(keep))
             out = out[keep]
 

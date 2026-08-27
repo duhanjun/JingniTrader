@@ -7,15 +7,24 @@
 - run() API 在无 ctx/user_input 时的失败路径
 - MasterEngine.__init__ 在干净环境下不抛异常（含 skill_sync 调用）
 """
+
 from __future__ import annotations
 
 import pytest
+
+# 本文件导入主调度器 engine（cvxpy/pypfopt 原生扩展），归入 heavy 批次以进程隔离运行，
+# 默认安全子集跳过，避免 Windows 原生栈同进程加载竞态段错误（OPEN-2026-0814-13）。
+pytestmark = [
+    pytest.mark.heavy,
+    pytest.mark.requires_sklearn,
+]
 
 
 class TestRunApiFailure:
     def test_run_without_ctx_and_input(self):
         """run() 不传 ctx 也不传 user_input → 失败"""
         import engine
+
         result = engine.run()
         assert result["success"] is False
         assert "user_input" in result["error"] or "ctx" in result["error"]
@@ -26,6 +35,7 @@ class TestMasterEngineInit:
         """MasterEngine.__init__ 在干净环境下不应抛异常"""
         monkeypatch.setenv("QUANT_WORK_DIR", str(tmp_path))
         import engine
+
         # 多次实例化不应累积状态
         m1 = engine.MasterEngine()
         m2 = engine.MasterEngine()

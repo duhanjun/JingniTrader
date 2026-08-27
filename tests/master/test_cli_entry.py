@@ -6,6 +6,7 @@
 - CLI 命令能完整跑通最小回测链路，并把结果写入 -o 指定的 JSON 文件
 - 退出码 0，输出 JSON 含 success/completed_stages/context 字段
 """
+
 from __future__ import annotations
 
 import os
@@ -38,14 +39,22 @@ class TestCliEntryPoint:
 
         intent = "获取近3年A股数据做一个反转因子选股回测并生成绩效报告"
         cmd = [
-            sys.executable, "engine.py",
-            "-i", intent,
-            "-o", str(output_json),
+            sys.executable,
+            "engine.py",
+            "-i",
+            intent,
+            "-o",
+            str(output_json),
         ]
         result = subprocess.run(
-            cmd, cwd=ROOT, env=env,
-            capture_output=True, text=True, timeout=120,
-            encoding="utf-8", errors="replace",
+            cmd,
+            cwd=ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            encoding="utf-8",
+            errors="replace",
         )
 
         # CLI 不应该崩溃
@@ -57,7 +66,7 @@ class TestCliEntryPoint:
 
         # 输出 JSON 文件应被写入
         assert output_json.exists(), f"输出文件未生成: {output_json}"
-        with open(output_json, "r", encoding="utf-8") as f:
+        with open(output_json, encoding="utf-8") as f:
             data = json.load(f)
         assert "success" in data
         assert "completed_stages" in data

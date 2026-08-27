@@ -4,12 +4,13 @@
 当某个数据源不可用时（积分不足 / 限频 / 网络故障等），
 抛出一个明确的异常类型，DataEngine 据此判断是否切换到下一个数据源。
 """
-from typing import Optional
+from __future__ import annotations
 
 
 class DataSourceError(Exception):
     """数据源通用错误基类"""
-    def __init__(self, source: str, message: str, retriable: bool = True, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, retriable: bool = True, original: Exception | None = None):
         self.source = source
         self.message = message
         self.retriable = retriable  # 是否值得在当前源上重试
@@ -27,7 +28,8 @@ class QuotaExceededError(DataSourceError):
     - "需要更高权限"
     - "抱歉，您访问接口(stock_basic)频率超限" 实际 40203 在某些版本中表示权限
     """
-    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, original: Exception | None = None):
         super().__init__(source, message, retriable=False, original=original)
 
 
@@ -42,20 +44,23 @@ class RateLimitError(DataSourceError):
     - "访问频率超限"
     - "每分钟最多 XXX 次"
     """
-    def __init__(self, source: str, message: str, retry_after: Optional[int] = None, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, retry_after: int | None = None, original: Exception | None = None):
         self.retry_after = retry_after  # 建议等待秒数（从错误消息解析）
         super().__init__(source, message, retriable=False, original=original)
 
 
 class NetworkError(DataSourceError):
     """网络错误（连接超时、DNS 失败等）"""
-    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, original: Exception | None = None):
         super().__init__(source, message, retriable=False, original=original)
 
 
 class InvalidParameterError(DataSourceError):
     """参数错误（不应切换数据源，因为下一家也会失败）"""
-    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, original: Exception | None = None):
         super().__init__(source, message, retriable=False, original=original)
 
 
@@ -74,7 +79,8 @@ class BlacklistedError(DataSourceError):
     - "forbidden"
     - "IP banned"
     """
-    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, original: Exception | None = None):
         super().__init__(source, message, retriable=False, original=original)
 
 
@@ -93,7 +99,24 @@ class DataNotFoundError(DataSourceError):
     - "该代码不存在"
     - "no matching record"
     """
-    def __init__(self, source: str, message: str, original: Optional[Exception] = None):
+
+    def __init__(self, source: str, message: str, original: Exception | None = None):
+        super().__init__(source, message, retriable=False, original=original)
+
+
+class NodeMissingError(DataSourceError):
+    """
+    westock 通道前置缺失错误（node/npx 未安装）。
+
+    REQ-2026-08-15 westock 接入设计 §5.3 明确：
+    - 此错误表示「运行前置缺失」，而非「数据源不可用」；
+    - **不纳入** FALLBACK_TRIGGERING_ERRORS，引擎不应据此静默降级到 baostock/akshare；
+    - 应由 agent 行为层（方案 2：检测→告知→征得同意→安装→刷新 PATH 重试）或
+      AUTO_INSTALL_NODE 开关（方案 1：代码层直接安装）处理。
+    - 复用方：westock_adapter._run_westock 在 `shutil.which("npx")` 失败时抛出。
+    """
+
+    def __init__(self, source: str, message: str, original: Exception | None = None):
         super().__init__(source, message, retriable=False, original=original)
 
 
@@ -106,4 +129,5 @@ FALLBACK_TRIGGERING_ERRORS = (
     BlacklistedError,
     DataNotFoundError,
     InvalidParameterError,  # token/auth 相关的 InvalidParameterError 也会触发（engine 内部判断）
+    # 注意：NodeMissingError 故意不在此集合内（见 §5.3 设计）
 )

@@ -2,9 +2,11 @@
 行业对比分析模块
 将个股的基本面指标与同行业公司进行对比
 """
+from __future__ import annotations
+
 import pandas as pd
 import numpy as np
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 import logging
 
 logger = logging.getLogger("industry_compare")
@@ -15,19 +17,19 @@ logger = logging.getLogger("industry_compare")
 # higher_is_better=True 表示该指标数值越大对公司越有利（如 ROE）
 #                        False 表示越小越有利（如 PE、资产负债率）
 _METRIC_CONFIG: Dict[str, Tuple[bool, str, str]] = {
-    "pe_ttm":         (False, "PE(市盈率)",   "valuation"),
-    "pb":             (False, "PB(市净率)",   "valuation"),
-    "ps_ttm":         (False, "PS(市销率)",   "valuation"),
-    "dv_ratio":       (True,  "股息率",        "valuation"),
-    "roe":            (True,  "ROE",          "fundamental"),
-    "roa":            (True,  "ROA",          "fundamental"),
-    "gross_margin":   (True,  "毛利率",        "fundamental"),
-    "net_margin":     (True,  "净利率",        "fundamental"),
-    "revenue_growth": (True,  "营收增速",      "fundamental"),
-    "profit_growth":  (True,  "利润增速",      "fundamental"),
-    "debt_ratio":     (False, "资产负债率",    "fundamental"),
-    "current_ratio":  (True,  "流动比率",      "fundamental"),
-    "quick_ratio":    (True,  "速动比率",      "fundamental"),
+    "pe_ttm": (False, "PE(市盈率)", "valuation"),
+    "pb": (False, "PB(市净率)", "valuation"),
+    "ps_ttm": (False, "PS(市销率)", "valuation"),
+    "dv_ratio": (True, "股息率", "valuation"),
+    "roe": (True, "ROE", "fundamental"),
+    "roa": (True, "ROA", "fundamental"),
+    "gross_margin": (True, "毛利率", "fundamental"),
+    "net_margin": (True, "净利率", "fundamental"),
+    "revenue_growth": (True, "营收增速", "fundamental"),
+    "profit_growth": (True, "利润增速", "fundamental"),
+    "debt_ratio": (False, "资产负债率", "fundamental"),
+    "current_ratio": (True, "流动比率", "fundamental"),
+    "quick_ratio": (True, "速动比率", "fundamental"),
 }
 
 _DEFAULT_METRICS: List[str] = list(_METRIC_CONFIG.keys())
@@ -36,8 +38,7 @@ _DEFAULT_METRICS: List[str] = list(_METRIC_CONFIG.keys())
 class IndustryComparator:
     """个股行业对比分析"""
 
-    def compare(self, stock_code: str, financial_data: pd.DataFrame,
-                industry: Optional[str] = None) -> Dict:
+    def compare(self, stock_code: str, financial_data: pd.DataFrame, industry: str | None = None) -> Dict:
         """
         将个股与同行业公司进行多维度对比
 
@@ -92,8 +93,11 @@ class IndustryComparator:
         # 行业判定：显式传入优先，否则从个股数据中读取
         if industry is None:
             industry = stock_row.get("industry")
-        if industry is None or (isinstance(industry, float) and np.isnan(industry)) \
-                or (isinstance(industry, str) and not industry.strip()):
+        if (
+            industry is None
+            or (isinstance(industry, float) and np.isnan(industry))
+            or (isinstance(industry, str) and not industry.strip())
+        ):
             logger.warning("股票 %s 缺少行业信息", stock_code)
             return empty
 
@@ -110,7 +114,7 @@ class IndustryComparator:
         metrics = [m for m in _DEFAULT_METRICS if m in industry_df.columns]
 
         # 个股指标值
-        stock_values: Dict[str, Optional[float]] = {}
+        stock_values: Dict[str, float | None] = {}
         for m in metrics:
             v = stock_row.get(m)
             try:
@@ -123,19 +127,16 @@ class IndustryComparator:
 
         # 行业均值：剔除自身后计算（更公允的同行对比）
         peers_df = industry_df[industry_df["code"] != stock_code]
-        industry_avg: Dict[str, Optional[float]] = {}
+        industry_avg: Dict[str, float | None] = {}
         for m in metrics:
-            s = pd.to_numeric(peers_df[m], errors="coerce") \
-                       .replace([np.inf, -np.inf], np.nan).dropna()
+            s = pd.to_numeric(peers_df[m], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
             industry_avg[m] = None if s.empty else round(float(s.mean()), 4)
 
         # 行业排名
         rankings = self._calc_rankings(stock_values, industry_df, metrics)
 
         # 优势/劣势洞察
-        advantages, disadvantages = self._generate_insights(
-            stock_values, industry_avg, rankings
-        )
+        advantages, disadvantages = self._generate_insights(stock_values, industry_avg, rankings)
 
         # 汇总结论
         summary = self._build_summary(rankings)
@@ -144,18 +145,14 @@ class IndustryComparator:
             "stock": stock_code,
             "industry": industry,
             "industry_avg": industry_avg,
-            "stock_values": {
-                m: (round(v, 4) if v is not None else None)
-                for m, v in stock_values.items()
-            },
+            "stock_values": {m: (round(v, 4) if v is not None else None) for m, v in stock_values.items()},
             "rankings": rankings,
             "advantages": advantages,
             "disadvantages": disadvantages,
             "summary": summary,
         }
 
-    def _calc_rankings(self, stock_values: Dict, industry_df: pd.DataFrame,
-                       metrics: List[str]) -> Dict:
+    def _calc_rankings(self, stock_values: Dict, industry_df: pd.DataFrame, metrics: List[str]) -> Dict:
         """计算个股在各指标中的行业排名
 
         rank 为 1 基，rank=1 表示该指标最优（PE 最低 或 ROE 最高）。
@@ -167,20 +164,14 @@ class IndustryComparator:
             if sv is None or m not in industry_df.columns:
                 continue
 
-            higher_is_better, label, _cat = _METRIC_CONFIG.get(
-                m, (True, m, "fundamental")
-            )
-            col = pd.to_numeric(industry_df[m], errors="coerce") \
-                         .replace([np.inf, -np.inf], np.nan).dropna()
+            higher_is_better, label, _cat = _METRIC_CONFIG.get(m, (True, m, "fundamental"))
+            col = pd.to_numeric(industry_df[m], errors="coerce").replace([np.inf, -np.inf], np.nan).dropna()
             total = len(col)
             if total == 0:
                 continue
 
             # 优于个股的数量（不含自身：自身等于 sv，不参与严格比较）
-            if higher_is_better:
-                better = int((col > sv).sum())
-            else:
-                better = int((col < sv).sum())
+            better = int((col > sv).sum()) if higher_is_better else int((col < sv).sum())
 
             rank = better + 1  # 1-based，最优为 1
             percentile = (total - rank) / total * 100.0
@@ -194,8 +185,7 @@ class IndustryComparator:
             }
         return rankings
 
-    def _generate_insights(self, stock_values: Dict, industry_avg: Dict,
-                           rankings: Dict) -> Tuple[List[str], List[str]]:
+    def _generate_insights(self, stock_values: Dict, industry_avg: Dict, rankings: Dict) -> Tuple[List[str], List[str]]:
         """生成优势/劣势洞察
 
         分位 >= 60% 视为优势，<= 40% 视为劣势；
@@ -218,11 +208,9 @@ class IndustryComparator:
                 # 中段：以与行业均值的对比做补充
                 if sv is not None and av is not None:
                     higher_is_better = _METRIC_CONFIG.get(m, (True,))[0]
-                    if (higher_is_better and sv > av) or \
-                       (not higher_is_better and sv < av):
+                    if (higher_is_better and sv > av) or (not higher_is_better and sv < av):
                         advantages.append(f"{label}优于行业平均")
-                    elif (higher_is_better and sv < av) or \
-                         (not higher_is_better and sv > av):
+                    elif (higher_is_better and sv < av) or (not higher_is_better and sv > av):
                         disadvantages.append(f"{label}弱于行业平均")
 
         return advantages, disadvantages

@@ -15,11 +15,12 @@
 环境变量：
     QUANT_PIT_STRICT: "true"（默认）强制契约；"false" 时降级为 warning（仅记日志不过滤）
 """
+
 from __future__ import annotations
 
 import logging
 import os
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 import pandas as pd
 
@@ -68,10 +69,7 @@ def pit_filter(df: pd.DataFrame, asof: str) -> pd.DataFrame:
     mask = disc <= asof_norm
     filtered_out = (~mask).sum()
     if filtered_out > 0:
-        logger.warning(
-            f"PIT 过滤：剔除 {filtered_out} 行未来披露数据"
-            f"（disclosure_date > {asof_norm}）"
-        )
+        logger.warning(f"PIT 过滤：剔除 {filtered_out} 行未来披露数据（disclosure_date > {asof_norm}）")
     return df[mask].copy()
 
 
@@ -98,9 +96,7 @@ def scan_pit_warnings(
         return []
 
     if "disclosure_date" not in df.columns:
-        logger.warning(
-            f"PIT 扫描：{table_name} 表缺 disclosure_date 列，无法做 PIT 校验"
-        )
+        logger.warning(f"PIT 扫描：{table_name} 表缺 disclosure_date 列，无法做 PIT 校验")
         return [{"error": "missing_disclosure_date", "table": table_name}]
 
     asof_norm = str(asof).replace("-", "")
@@ -111,16 +107,17 @@ def scan_pit_warnings(
 
     warnings: List[Dict[str, Any]] = []
     for _, row in df[future_mask].iterrows():
-        warnings.append({
-            "table": table_name,
-            "code": str(row.get("code", "")),
-            "report_date": str(row.get("report_date", "")),
-            "disclosure_date": str(row.get("disclosure_date", "")),
-            "asof": asof_norm,
-        })
+        warnings.append(
+            {
+                "table": table_name,
+                "code": str(row.get("code", "")),
+                "report_date": str(row.get("report_date", "")),
+                "disclosure_date": str(row.get("disclosure_date", "")),
+                "asof": asof_norm,
+            }
+        )
     logger.warning(
-        f"PIT 扫描：{table_name} 表发现 {len(warnings)} 行未来披露数据"
-        f"（disclosure_date > {asof_norm}），将在出口过滤"
+        f"PIT 扫描：{table_name} 表发现 {len(warnings)} 行未来披露数据（disclosure_date > {asof_norm}），将在出口过滤"
     )
     return warnings
 
@@ -159,8 +156,5 @@ def ensure_pit_filtered(df: pd.DataFrame, asof: str, caller: str = "") -> pd.Dat
         return df
 
     filtered = pit_filter(df, asof)
-    logger.info(
-        f"{caller_tag}PIT 守卫：过滤前 {len(df)} 行 → 过滤后 {len(filtered)} 行"
-        f"（asof={asof}）"
-    )
+    logger.info(f"{caller_tag}PIT 守卫：过滤前 {len(df)} 行 → 过滤后 {len(filtered)} 行（asof={asof}）")
     return filtered

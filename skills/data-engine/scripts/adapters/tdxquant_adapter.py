@@ -15,13 +15,13 @@
 代码格式：项目统一使用 '600000.SH' / '000001.SZ'，本适配器内部转换为
 pytdx 的 (market, code)：market 0=深圳 1=上海，code 为纯数字。
 """
+
 import logging
-import os
-from typing import List, Optional
+from typing import List
 import pandas as pd
 
-from ..base.base_data_provider import BaseDataProvider
-from ..errors import DataSourceError
+from scripts.base.base_data_provider import BaseDataProvider
+from scripts.errors import DataSourceError
 
 
 logger = logging.getLogger("tdxquant-adapter")
@@ -29,11 +29,25 @@ logger = logging.getLogger("tdxquant-adapter")
 
 def _finalize(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or len(df) == 0:
-        return pd.DataFrame(columns=[
-            "code", "date", "open", "high", "low", "close", "volume", "amount",
-            "pre_close", "change_pct", "turnover_rate",
-            "is_st", "is_limit_up", "is_limit_down", "listed_days"
-        ])
+        return pd.DataFrame(
+            columns=[
+                "code",
+                "date",
+                "open",
+                "high",
+                "low",
+                "close",
+                "volume",
+                "amount",
+                "pre_close",
+                "change_pct",
+                "turnover_rate",
+                "is_st",
+                "is_limit_up",
+                "is_limit_down",
+                "listed_days",
+            ]
+        )
     if "vol" in df.columns and "volume" not in df.columns:
         df = df.rename(columns={"vol": "volume"})
     df["date"] = pd.to_datetime(df["date"])
@@ -47,49 +61,59 @@ def _finalize(df: pd.DataFrame) -> pd.DataFrame:
     df["is_st"] = df["is_st"].fillna(False)
     df["is_limit_up"] = df["is_limit_up"].fillna(False)
     df["is_limit_down"] = df["is_limit_down"].fillna(False)
-    cols = ["code", "date", "open", "high", "low", "close", "volume", "amount",
-            "pre_close", "change_pct", "turnover_rate",
-            "is_st", "is_limit_up", "is_limit_down", "listed_days"]
+    cols = [
+        "code",
+        "date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "pre_close",
+        "change_pct",
+        "turnover_rate",
+        "is_st",
+        "is_limit_up",
+        "is_limit_down",
+        "listed_days",
+    ]
     return df.sort_values(["code", "date"]).reset_index(drop=True)[cols]
 
 
 class TdxQuantAdapter(BaseDataProvider):
     """通达信行情适配器（pytdx 实现）。"""
 
-    SUPPORTED_DATA_TYPES = {"daily", "financial"}
+    # 实测确认（REQ-2026-0816-source-capability-verify，锚点 600519）：
+    # get_stock_list✅(6000行) / get_daily✅ / get_kline(day,基类映射到 get_daily)✅ /
+    # get_financial✅(get_finance_info 最新一期) / get_adj_factor 返回空DF(行情服无因子)。
+    SUPPORTED_DATA_TYPES = {"daily", "financial", "basic_stock_list", "market_kline"}
 
     def __init__(self):
         try:
             import pytdx  # noqa
+
             self.available = True
         except ImportError:
-            logger.warning(
-                "pytdx 未安装，TdxQuantAdapter 不可用。"
-                "请 pip install pytdx（通达信行情库）。"
-            )
+            logger.warning("pytdx 未安装，TdxQuantAdapter 不可用。请 pip install pytdx（通达信行情库）。")
             self.available = False
 
     def _check_available(self):
         if not self.available:
-            raise DataSourceError(
-                "tdxquant",
-                "pytdx 未安装或无法连接通达信行情服务器，请 pip install pytdx"
-            )
+            raise DataSourceError("tdxquant", "pytdx 未安装或无法连接通达信行情服务器，请 pip install pytdx")
 
     @staticmethod
     def _split_code(code: str):
         """'600000.SH' -> (market=1, '600000')；'000001.SZ' -> (market=0, '000001')。"""
         code = code.strip()
         pure = code.split(".")[0]
-        if code.endswith(".SZ") or pure.startswith(("0", "3")):
-            market = 0
-        else:
-            market = 1
+        market = 0 if code.endswith(".SZ") or pure.startswith(("0", "3")) else 1
         return market, pure
 
     def _connect(self):
         from pytdx.hq import TdxHq_API
         from pytdx.util import best_ip as bip
+
         # 优先尝试已知稳定的域名，再回退到内置全量列表
         candidates = [
             ("jstdx.gtjas.com", 7709),
@@ -117,19 +141,12 @@ class TdxQuantAdapter(BaseDataProvider):
                 last_err = e
         raise DataSourceError("tdxquant", f"无法连接任何通达信行情服务器: {last_err}")
 
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         self._check_available()
         from pytdx.params import TDXParams
+
         if adjust not in ("none", ""):
-            logger.warning(
-                "通达信行情服务器仅提供不复权数据，忽略 adjust=%s，返回不复权价", adjust
-            )
+            logger.warning("通达信行情服务器仅提供不复权数据，忽略 adjust=%s，返回不复权价", adjust)
         sd_dt = pd.to_datetime(start_date).normalize()
         ed_dt = pd.to_datetime(end_date).normalize()
         # 单次取足够覆盖区间的交易日（pytdx 内部自动分片拼接）
@@ -141,9 +158,7 @@ class TdxQuantAdapter(BaseDataProvider):
             for code in symbols:
                 market, pure = self._split_code(code)
                 try:
-                    bars = api.get_security_bars(
-                        TDXParams.KLINE_TYPE_DAILY, market, pure, 0, count
-                    )
+                    bars = api.get_security_bars(TDXParams.KLINE_TYPE_DAILY, market, pure, 0, count)
                 except Exception as e:
                     logger.warning("TdxQuant 获取 %s 失败: %s", code, e)
                     continue
@@ -157,8 +172,7 @@ class TdxQuantAdapter(BaseDataProvider):
                 d["vol"] = d["vol"] / 100.0  # pytdx 成交量单位为股，转为与 tushare/xtdata 一致的"手"
                 d = d.rename(columns={"vol": "volume"})
                 d["code"] = code
-                frames.append(d[["date", "code", "open", "high", "low", "close",
-                                  "volume", "amount"]])
+                frames.append(d[["date", "code", "open", "high", "low", "close", "volume", "amount"]])
             if not frames:
                 return _finalize(pd.DataFrame())
             return _finalize(pd.concat(frames, ignore_index=True))
@@ -185,11 +199,13 @@ class TdxQuantAdapter(BaseDataProvider):
                         name = it.get("name", "")
                         if not c:
                             continue
-                        rows.append({
-                            "code": c + suffix,
-                            "name": name,
-                            "is_st": "ST" in str(name),
-                        })
+                        rows.append(
+                            {
+                                "code": c + suffix,
+                                "name": name,
+                                "is_st": "ST" in str(name),
+                            }
+                        )
                     if len(batch) < 1000:
                         break
                     start += len(batch)
@@ -227,15 +243,29 @@ class TdxQuantAdapter(BaseDataProvider):
         # P0-1 PIT 契约：末尾追加 disclosure_date
         # tdxquant 无原生披露日接口，出口回填为 report_date（保守降级）
         standard_cols = [
-            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
-            'roe', 'roa', 'gross_margin', 'net_margin',
-            'revenue_growth', 'profit_growth',
-            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name', 'disclosure_date',
+            "code",
+            "report_date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ratio",
+            "roe",
+            "roa",
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+            "industry",
+            "name",
+            "disclosure_date",
         ]
 
         # 标准化报告期: '2024-09-30' -> '20240930'
-        period = report_date.replace('-', '')
+        period = report_date.replace("-", "")
 
         api = self._connect()
         try:
@@ -262,12 +292,12 @@ class TdxQuantAdapter(BaseDataProvider):
             rows = []
             for code in symbols:
                 market, pure = self._split_code(code)
-                row = {col: None for col in standard_cols}
-                row['code'] = code
-                row['report_date'] = period
+                row = dict.fromkeys(standard_cols)
+                row["code"] = code
+                row["report_date"] = period
                 # P0-1 PIT 契约：tdxquant 无原生披露日，回填为 report_date（保守降级）
-                row['disclosure_date'] = period
-                row['name'] = name_map.get(code, '')
+                row["disclosure_date"] = period
+                row["name"] = name_map.get(code, "")
 
                 try:
                     fin = api.get_finance_info(market, pure)
@@ -280,31 +310,31 @@ class TdxQuantAdapter(BaseDataProvider):
                     rows.append(row)
                     continue
 
-                zongzichan = self._to_num(fin.get('zongzichan'))
-                jingzichan = self._to_num(fin.get('jingzichan'))
-                zhuyingshouru = self._to_num(fin.get('zhuyingshouru'))
-                jinglirun = self._to_num(fin.get('jinglirun'))
-                zhuyinglirun = self._to_num(fin.get('zhuyinglirun'))
-                ocf = self._to_num(fin.get('jingyingxianjinliu'))
+                zongzichan = self._to_num(fin.get("zongzichan"))
+                jingzichan = self._to_num(fin.get("jingzichan"))
+                zhuyingshouru = self._to_num(fin.get("zhuyingshouru"))
+                jinglirun = self._to_num(fin.get("jinglirun"))
+                zhuyinglirun = self._to_num(fin.get("zhuyinglirun"))
+                ocf = self._to_num(fin.get("jingyingxianjinliu"))
 
                 # 经营现金流净额
-                row['ocf'] = ocf
+                row["ocf"] = ocf
 
                 # 资产负债率 = 总负债 / 总资产; 总负债 ≈ 总资产 - 净资产
                 if zongzichan and zongzichan != 0 and jingzichan is not None:
-                    row['debt_ratio'] = (zongzichan - jingzichan) / zongzichan * 100.0
+                    row["debt_ratio"] = (zongzichan - jingzichan) / zongzichan * 100.0
                 # ROE(未年化) = 净利润 / 净资产
                 if jinglirun is not None and jingzichan and jingzichan != 0:
-                    row['roe'] = jinglirun / jingzichan * 100.0
+                    row["roe"] = jinglirun / jingzichan * 100.0
                 # ROA = 净利润 / 总资产
                 if jinglirun is not None and zongzichan and zongzichan != 0:
-                    row['roa'] = jinglirun / zongzichan * 100.0
+                    row["roa"] = jinglirun / zongzichan * 100.0
                 # 销售净利率 = 净利润 / 营业收入
                 if jinglirun is not None and zhuyingshouru and zhuyingshouru != 0:
-                    row['net_margin'] = jinglirun / zhuyingshouru * 100.0
+                    row["net_margin"] = jinglirun / zhuyingshouru * 100.0
                 # 主营利润率(近似毛利率) = 主营利润 / 营业收入
                 if zhuyinglirun is not None and zhuyingshouru and zhuyingshouru != 0:
-                    row['gross_margin'] = zhuyinglirun / zhuyingshouru * 100.0
+                    row["gross_margin"] = zhuyinglirun / zhuyingshouru * 100.0
 
                 rows.append(row)
         finally:
@@ -318,7 +348,7 @@ class TdxQuantAdapter(BaseDataProvider):
         # 如果调用方指定了 fields，按需过滤列
         # P0-1 PIT 契约：code/report_date/disclosure_date 始终保留
         if fields:
-            keep = ['code', 'report_date', 'disclosure_date'] + [f for f in fields if f in standard_cols]
+            keep = ["code", "report_date", "disclosure_date"] + [f for f in fields if f in standard_cols]
             keep = list(dict.fromkeys(keep))
             out = out[keep]
 
@@ -331,6 +361,7 @@ class TdxQuantAdapter(BaseDataProvider):
             return None
         try:
             import math
+
             f = float(val)
             return None if (isinstance(f, float) and math.isnan(f)) else f
         except (TypeError, ValueError):

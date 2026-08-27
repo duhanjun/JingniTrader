@@ -14,13 +14,15 @@ WebSearch 适配器（终极数据源）
 - 解析依赖正则/LLM，复杂数据点可能失败
 - 适合"补缺"而非"主源"
 """
+from __future__ import annotations
+
 import logging
 import re
-from typing import List, Callable, Optional
+from typing import List, Callable
 import pandas as pd
 
-from ..base.base_data_provider import BaseDataProvider
-from ..errors import DataSourceError, DataNotFoundError
+from scripts.base.base_data_provider import BaseDataProvider
+from scripts.errors import DataSourceError, DataNotFoundError
 
 
 logger = logging.getLogger("websearch-adapter")
@@ -41,7 +43,7 @@ class WebSearchAdapter(BaseDataProvider):
 
     SUPPORTED_DATA_TYPES = {"daily", "financial"}
 
-    def __init__(self, web_search_fn: Optional[WebSearchFn] = None):
+    def __init__(self, web_search_fn: WebSearchFn | None = None):
         """
         参数:
             web_search_fn: 注入的搜索函数，签名 (query: str) -> str
@@ -50,16 +52,12 @@ class WebSearchAdapter(BaseDataProvider):
         self.web_search_fn = web_search_fn
         if not web_search_fn:
             logger.warning(
-                "WebSearchAdapter 未注入 web_search_fn，"
-                "如需启用请通过 Context.external_data.web_search_fn 注入"
+                "WebSearchAdapter 未注入 web_search_fn，如需启用请通过 Context.external_data.web_search_fn 注入"
             )
 
     def _check_available(self):
         if not self.web_search_fn:
-            raise DataSourceError(
-                "websearch",
-                "web_search_fn 未注入（jingni-trader 应通过 Context 注入）"
-            )
+            raise DataSourceError("websearch", "web_search_fn 未注入（jingni-trader 应通过 Context 注入）")
 
     def _build_query(self, symbol: str, date: str) -> str:
         """构造搜索查询语句"""
@@ -135,8 +133,7 @@ class WebSearchAdapter(BaseDataProvider):
         # 如果连收盘价都没解析出来，标记为 DataNotFoundError
         if "close" not in result:
             raise DataNotFoundError(
-                "websearch",
-                f"无法从搜索结果中解析出 {symbol} @ {date} 的数据（搜索引擎无相关数据或结果无法解析）"
+                "websearch", f"无法从搜索结果中解析出 {symbol} @ {date} 的数据（搜索引擎无相关数据或结果无法解析）"
             )
         # 默认值
         for k in ["open", "high", "low", "vol"]:
@@ -144,7 +141,7 @@ class WebSearchAdapter(BaseDataProvider):
                 result[k] = pd.NA
         return result
 
-    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = 'hfq') -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         """
         通过 WebSearch 逐个数据点查询
 
@@ -156,11 +153,9 @@ class WebSearchAdapter(BaseDataProvider):
         - DataSourceError: web_search_fn 未注入
         """
         self._check_available()
-        from ..config import MAX_WORKERS
         # 简化实现：逐个标的关键点查询
         # 实际工程中可并发，但搜索请求本身有节流
         rows = []
-        failed_symbols = []
         for symbol in symbols:
             # 取首尾两点作为代表（避免太多搜索请求）
             sample_dates = [start_date, end_date]
@@ -181,8 +176,7 @@ class WebSearchAdapter(BaseDataProvider):
         if not rows:
             # 所有查询都失败
             raise DataNotFoundError(
-                "websearch",
-                f"WebSearch 未能找到 {len(symbols)} 个标的（{', '.join(symbols[:3])}...）的有效数据"
+                "websearch", f"WebSearch 未能找到 {len(symbols)} 个标的（{', '.join(symbols[:3])}...）的有效数据"
             )
         return pd.DataFrame(rows)
 
@@ -190,10 +184,7 @@ class WebSearchAdapter(BaseDataProvider):
         """
         WebSearch 不适合拉全市场列表，应避免调用
         """
-        raise DataSourceError(
-            "websearch",
-            "WebSearchAdapter 不支持 get_stock_list（请使用 baostock 或 akshare）"
-        )
+        raise DataSourceError("websearch", "WebSearchAdapter 不支持 get_stock_list（请使用 baostock 或 akshare）")
 
     def get_adj_factor(self, symbols, start_date, end_date):
         return pd.DataFrame()
@@ -205,10 +196,23 @@ class WebSearchAdapter(BaseDataProvider):
         此处规范为返回带标准列的空 DataFrame，由上层降级链切换到其他源。
         """
         standard_cols = [
-            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
-            'roe', 'roa', 'gross_margin', 'net_margin',
-            'revenue_growth', 'profit_growth',
-            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name',
+            "code",
+            "report_date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ratio",
+            "roe",
+            "roa",
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+            "industry",
+            "name",
         ]
         return pd.DataFrame(columns=standard_cols)

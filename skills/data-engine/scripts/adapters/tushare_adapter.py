@@ -6,17 +6,18 @@ Tushare Pro 数据源适配器
 - 异常会被 tushare_error_classifier 归类为 QuotaExceededError / RateLimitError / NetworkError 等
 - 上层 DataEngine 据此判断是否切换到下一个数据源
 """
-import os
+from __future__ import annotations
+
 import time
 import logging
-from typing import List, Optional
+from typing import List
 import pandas as pd
 import tushare as ts
 
-from ..base.base_data_provider import BaseDataProvider
-from ..config import TUSHARE_TOKEN, MAX_WORKERS
-from ..errors import DataSourceError, QuotaExceededError, RateLimitError, NetworkError
-from ..tushare_error_classifier import classify_tushare_error
+from scripts.base.base_data_provider import BaseDataProvider
+from scripts.config import TUSHARE_TOKEN
+from scripts.errors import DataSourceError, QuotaExceededError, RateLimitError
+from scripts.tushare_error_classifier import classify_tushare_error
 
 
 logger = logging.getLogger("tushare-adapter")
@@ -25,9 +26,15 @@ logger = logging.getLogger("tushare-adapter")
 class TushareAdapter(BaseDataProvider):
     """Tushare Pro 适配器"""
 
-    SUPPORTED_DATA_TYPES = {"daily", "financial", "capital_flow", "dragon_tiger"}
+    # 实测确认（REQ-2026-0816-source-capability-verify，锚点 600519）：
+    # 真实可用：daily✅(限频) / financial◐(fina_indicator 积分不足) /
+    # capital_flow◐ / dragon_tiger◐(均 top_list/moneyflow 高积分接口，积分不足返空) /
+    # basic_stock_list✅(5543行) / basic_adjust_factor✅(21行, get_adj_factor 实装)。
+    # R2 积分门控：capital_flow/dragon_tiger 在配额不足时经 classify_tushare_error 抛
+    # QuotaExceededError 触发降级，避免 engine 静默拿空。
+    SUPPORTED_DATA_TYPES = {"daily", "financial", "capital_flow", "dragon_tiger", "basic_stock_list", "basic_adjust_factor"}
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: str | None = None):
         token = token or TUSHARE_TOKEN
         if not token:
             raise ValueError("Tushare token 未设置，请设置环境变量 TUSHARE_TOKEN")
@@ -68,50 +75,34 @@ class TushareAdapter(BaseDataProvider):
     def get_stock_list(self) -> pd.DataFrame:
         """获取全市场股票列表"""
         df = self._safe_call(
-            self.pro.stock_basic,
-            exchange='',
-            list_status='L',
-            fields='ts_code,symbol,name,area,industry,list_date'
+            self.pro.stock_basic, exchange="", list_status="L", fields="ts_code,symbol,name,area,industry,list_date"
         )
         if df is None or df.empty:
             return pd.DataFrame()
-        df.rename(columns={
-            'ts_code': 'code',
-            'symbol': 'ticker',
-            'list_date': 'list_date'
-        }, inplace=True)
+        df.rename(columns={"ts_code": "code", "symbol": "ticker", "list_date": "list_date"}, inplace=True)
         # 获取ST标记
         try:
-            st_df = self._safe_call(
-                self.pro.namechange,
-                fields='ts_code,name,start_date,end_date'
-            )
+            self._safe_call(self.pro.namechange, fields="ts_code,name,start_date,end_date")
         except DataSourceError as e:
             logger.warning(f"获取ST标记失败（{e.message}），跳过")
-            st_df = pd.DataFrame()
+            pd.DataFrame()
         # 简化：当前名称含ST的标记
         # 实际需更复杂逻辑，此处仅示例
-        df['is_st'] = df['name'].str.contains('ST', na=False)
+        df["is_st"] = df["name"].str.contains("ST", na=False)
         return df
 
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         """
         获取日线行情，自动复权并添加A股特殊标记
         """
         # 格式标准化
-        start_date = start_date.replace('-', '')
-        end_date = end_date.replace('-', '')
+        start_date = start_date.replace("-", "")
+        end_date = end_date.replace("-", "")
 
         # 根据复权方式选择接口
-        if adjust == 'hfq':
+        if adjust == "hfq":
             return self._get_hfq_daily(symbols, start_date, end_date)
-        elif adjust == 'qfq':
+        elif adjust == "qfq":
             return self._get_qfq_daily(symbols, start_date, end_date)
         else:
             # 不复权直接用 pro.daily
@@ -127,32 +118,23 @@ class TushareAdapter(BaseDataProvider):
                     ts_code=symbol,
                     start_date=start_date,
                     end_date=end_date,
-                    fields='ts_code,trade_date,open,high,low,close,pre_close,vol,amount'
+                    fields="ts_code,trade_date,open,high,low,close,pre_close,vol,amount",
                 )
                 if df is None or df.empty:
                     continue
                 # 获取复权因子
-                adj_df = self._safe_call(
-                    self.pro.adj_factor,
-                    ts_code=symbol,
-                    start_date=start_date,
-                    end_date=end_date
-                )
+                adj_df = self._safe_call(self.pro.adj_factor, ts_code=symbol, start_date=start_date, end_date=end_date)
                 if adj_df is not None and not adj_df.empty:
                     # 使用后复权因子调整价格
-                    df = df.merge(
-                        adj_df[['trade_date', 'adj_factor']],
-                        on='trade_date',
-                        how='left'
-                    )
+                    df = df.merge(adj_df[["trade_date", "adj_factor"]], on="trade_date", how="left")
                     # 后复权：最新价 = 不复权价 * (当前复权因子 / 最后因子)
                     # 标准做法：以最新日为基准，向前复权
-                    last_adj = adj_df['adj_factor'].iloc[-1]
-                    df['adj_factor'] = df['adj_factor'].fillna(last_adj)
-                    for col in ['open', 'high', 'low', 'close']:
-                        df[col] = df[col] * (df['adj_factor'] / last_adj)
+                    last_adj = adj_df["adj_factor"].iloc[-1]
+                    df["adj_factor"] = df["adj_factor"].fillna(last_adj)
+                    for col in ["open", "high", "low", "close"]:
+                        df[col] = df[col] * (df["adj_factor"] / last_adj)
                 frames.append(df)
-            except DataSourceError as e:
+            except DataSourceError:
                 # 限频/积分等不可恢复错误：让上层切换数据源
                 raise
             except Exception as e:
@@ -188,7 +170,7 @@ class TushareAdapter(BaseDataProvider):
                 ts_code=symbol,
                 start_date=start_date,
                 end_date=end_date,
-                fields='ts_code,trade_date,open,high,low,close,pre_close,vol,amount'
+                fields="ts_code,trade_date,open,high,low,close,pre_close,vol,amount",
             )
             if df is not None and not df.empty:
                 frames.append(df)
@@ -201,46 +183,36 @@ class TushareAdapter(BaseDataProvider):
         """标准化输出列名与数据类型"""
         if df.empty:
             return df
-        df = df.rename(columns={
-            'ts_code': 'code',
-            'trade_date': 'date',
-            'vol': 'volume',
-            'pre_close': 'pre_close'
-        })
-        df['date'] = pd.to_datetime(df['date'], format='%Y%m%d')
+        df = df.rename(columns={"ts_code": "code", "trade_date": "date", "vol": "volume", "pre_close": "pre_close"})
+        df["date"] = pd.to_datetime(df["date"], format="%Y%m%d")
         # 计算涨跌幅和换手率（若缺失）
-        if 'change_pct' not in df.columns:
-            df['change_pct'] = (df['close'] - df['pre_close']) / df['pre_close'] * 100
+        if "change_pct" not in df.columns:
+            df["change_pct"] = (df["close"] - df["pre_close"]) / df["pre_close"] * 100
         # 换手率暂无法从该接口获取，留空
-        df['turnover_rate'] = df.get('turnover_rate', None)
+        df["turnover_rate"] = df.get("turnover_rate", None)
         # A股特殊标记留待清洗阶段填充
-        df['is_st'] = False
-        df['is_limit_up'] = False
-        df['is_limit_down'] = False
-        df['listed_days'] = None
+        df["is_st"] = False
+        df["is_limit_up"] = False
+        df["is_limit_down"] = False
+        df["listed_days"] = None
         # 排序
-        df = df.sort_values(['code', 'date']).reset_index(drop=True)
+        df = df.sort_values(["code", "date"]).reset_index(drop=True)
         return df
 
     def get_adj_factor(self, symbols, start_date, end_date):
         # 简单适配
-        start_date = start_date.replace('-', '')
-        end_date = end_date.replace('-', '')
+        start_date = start_date.replace("-", "")
+        end_date = end_date.replace("-", "")
         frames = []
         for symbol in symbols:
-            adj_df = self._safe_call(
-                self.pro.adj_factor,
-                ts_code=symbol,
-                start_date=start_date,
-                end_date=end_date
-            )
+            adj_df = self._safe_call(self.pro.adj_factor, ts_code=symbol, start_date=start_date, end_date=end_date)
             if adj_df is not None and not adj_df.empty:
                 frames.append(adj_df)
         if not frames:
             return pd.DataFrame()
         result = pd.concat(frames)
-        result.rename(columns={'ts_code': 'code', 'trade_date': 'date'}, inplace=True)
-        result['date'] = pd.to_datetime(result['date'], format='%Y%m%d')
+        result.rename(columns={"ts_code": "code", "trade_date": "date"}, inplace=True)
+        result["date"] = pd.to_datetime(result["date"], format="%Y%m%d")
         return result
 
     def get_financial(self, symbols, report_date, fields):
@@ -259,35 +231,44 @@ class TushareAdapter(BaseDataProvider):
             debt_ratio, current_ratio, quick_ratio, ocf,
             industry, name, disclosure_date
         """
-        period = report_date.replace('-', '')
+        period = report_date.replace("-", "")
 
         # 标准输出列（固定顺序）
         # P0-1 PIT 契约：末尾追加 disclosure_date（来自 tushare ann_date，真实披露日）
         standard_cols = [
-            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
-            'roe', 'roa', 'gross_margin', 'net_margin',
-            'revenue_growth', 'profit_growth',
-            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name', 'disclosure_date',
+            "code",
+            "report_date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ratio",
+            "roe",
+            "roa",
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+            "industry",
+            "name",
+            "disclosure_date",
         ]
 
         # 1) 财务指标 fina_indicator
         fina_fields = (
-            'ts_code,ann_date,end_date,'
-            'roe,roa,grossprofit_margin,netprofit_margin,'
-            'or_on_year,qprofit_yoy,'
-            'debt_to_assets,current_ratio,quick_ratio,'
-            'netcash_oper'
+            "ts_code,ann_date,end_date,"
+            "roe,roa,grossprofit_margin,netprofit_margin,"
+            "or_on_year,qprofit_yoy,"
+            "debt_to_assets,current_ratio,quick_ratio,"
+            "netcash_oper"
         )
         fina_frames = []
         for symbol in symbols:
             try:
-                df_f = self._safe_call(
-                    self.pro.fina_indicator,
-                    ts_code=symbol,
-                    period=period,
-                    fields=fina_fields
-                )
+                df_f = self._safe_call(self.pro.fina_indicator, ts_code=symbol, period=period, fields=fina_fields)
                 if df_f is not None and not df_f.empty:
                     fina_frames.append(df_f)
             except DataSourceError:
@@ -301,10 +282,8 @@ class TushareAdapter(BaseDataProvider):
 
         fina_df = pd.concat(fina_frames, ignore_index=True)
         # 同一报告期可能有多条（更新批次），保留最新 ann_date
-        if 'ann_date' in fina_df.columns:
-            fina_df = fina_df.sort_values('ann_date').drop_duplicates(
-                subset=['ts_code', 'end_date'], keep='last'
-            )
+        if "ann_date" in fina_df.columns:
+            fina_df = fina_df.sort_values("ann_date").drop_duplicates(subset=["ts_code", "end_date"], keep="last")
 
         # 2) 估值数据 daily_basic（用报告期对应的当日；若当日无数据则返回空）
         val_frames = []
@@ -314,7 +293,7 @@ class TushareAdapter(BaseDataProvider):
                     self.pro.daily_basic,
                     ts_code=symbol,
                     trade_date=period,
-                    fields='ts_code,trade_date,pe_ttm,pb,ps_ttm,dv_ratio'
+                    fields="ts_code,trade_date,pe_ttm,pb,ps_ttm,dv_ratio",
                 )
                 if df_v is not None and not df_v.empty:
                     val_frames.append(df_v)
@@ -326,82 +305,90 @@ class TushareAdapter(BaseDataProvider):
 
         if val_frames:
             val_df = pd.concat(val_frames, ignore_index=True)
-            val_df = val_df.rename(columns={'trade_date': 'val_date'})
+            val_df = val_df.rename(columns={"trade_date": "val_date"})
         else:
-            val_df = pd.DataFrame(columns=['ts_code', 'val_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio'])
+            val_df = pd.DataFrame(columns=["ts_code", "val_date", "pe_ttm", "pb", "ps_ttm", "dv_ratio"])
 
         # 3) 行业 + 名称（一次性获取全市场，本地过滤）
         try:
             basic_df = self._safe_call(
-                self.pro.stock_basic,
-                exchange='',
-                list_status='L',
-                fields='ts_code,name,industry'
+                self.pro.stock_basic, exchange="", list_status="L", fields="ts_code,name,industry"
             )
         except DataSourceError:
             raise
         except Exception as e:
             logger.warning(f"获取 stock_basic 失败: {e}")
-            basic_df = pd.DataFrame(columns=['ts_code', 'name', 'industry'])
+            basic_df = pd.DataFrame(columns=["ts_code", "name", "industry"])
 
         if basic_df is None or basic_df.empty:
-            basic_df = pd.DataFrame(columns=['ts_code', 'name', 'industry'])
+            basic_df = pd.DataFrame(columns=["ts_code", "name", "industry"])
 
         # 4) 合并
-        merged = fina_df.merge(val_df, on='ts_code', how='left')
-        merged = merged.merge(basic_df, on='ts_code', how='left')
+        merged = fina_df.merge(val_df, on="ts_code", how="left")
+        merged = merged.merge(basic_df, on="ts_code", how="left")
 
         # 5) 字段映射到标准 schema
         out = pd.DataFrame()
-        out['code'] = merged['ts_code']
-        out['report_date'] = merged['end_date']
+        out["code"] = merged["ts_code"]
+        out["report_date"] = merged["end_date"]
         # 估值字段（daily_basic）
-        out['pe_ttm'] = merged.get('pe_ttm')
-        out['pb'] = merged.get('pb')
-        out['ps_ttm'] = merged.get('ps_ttm')
-        out['dv_ratio'] = merged.get('dv_ratio')
+        out["pe_ttm"] = merged.get("pe_ttm")
+        out["pb"] = merged.get("pb")
+        out["ps_ttm"] = merged.get("ps_ttm")
+        out["dv_ratio"] = merged.get("dv_ratio")
         # 财务指标（fina_indicator）
-        out['roe'] = merged.get('roe')
-        out['roa'] = merged.get('roa')
-        out['gross_margin'] = merged.get('grossprofit_margin')
-        out['net_margin'] = merged.get('netprofit_margin')
-        out['revenue_growth'] = merged.get('or_on_year')
-        out['profit_growth'] = merged.get('qprofit_yoy')
-        out['debt_ratio'] = merged.get('debt_to_assets')
-        out['current_ratio'] = merged.get('current_ratio')
-        out['quick_ratio'] = merged.get('quick_ratio')
-        out['ocf'] = merged.get('netcash_oper')
+        out["roe"] = merged.get("roe")
+        out["roa"] = merged.get("roa")
+        out["gross_margin"] = merged.get("grossprofit_margin")
+        out["net_margin"] = merged.get("netprofit_margin")
+        out["revenue_growth"] = merged.get("or_on_year")
+        out["profit_growth"] = merged.get("qprofit_yoy")
+        out["debt_ratio"] = merged.get("debt_to_assets")
+        out["current_ratio"] = merged.get("current_ratio")
+        out["quick_ratio"] = merged.get("quick_ratio")
+        out["ocf"] = merged.get("netcash_oper")
         # 行业与名称（stock_basic）
-        out['industry'] = merged.get('industry')
-        out['name'] = merged.get('name')
+        out["industry"] = merged.get("industry")
+        out["name"] = merged.get("name")
 
         # P0-1 PIT 契约：disclosure_date 来自 tushare ann_date（真实披露日）
         # 若 ann_date 缺失，回填为 report_date（保守降级，确保下游 pit_filter 不 raise）
-        if 'ann_date' in merged.columns:
-            out['disclosure_date'] = merged['ann_date'].fillna(merged['end_date'])
+        if "ann_date" in merged.columns:
+            out["disclosure_date"] = merged["ann_date"].fillna(merged["end_date"])
         else:
-            out['disclosure_date'] = merged['end_date']
+            out["disclosure_date"] = merged["end_date"]
 
         # 如果调用方指定了 fields，按需过滤列
         # P0-1 PIT 契约：code/report_date/disclosure_date 始终保留（防止下游 pit_filter 缺列 raise）
         if fields:
-            keep = ['code', 'report_date', 'disclosure_date'] + [f for f in fields if f in standard_cols]
+            keep = ["code", "report_date", "disclosure_date"] + [f for f in fields if f in standard_cols]
             keep = list(dict.fromkeys(keep))  # 去重保序
             out = out[keep]
 
         return out.reset_index(drop=True)
 
     def get_capital_flow(self, symbols, start_date, end_date, **kwargs):
-        """获取资金面数据（tushare moneyflow接口）"""
+        """获取资金面数据（tushare moneyflow接口）
+
+        积分门控（REQ-2026-0816-source-capability-verify R2）：
+        moneyflow 为高积分接口，积分不足时 tushare 返回「没有接口(moneyflow)访问权限」
+        类错误。此处经 classify_tushare_error 识别为 QuotaExceededError 并重新抛出，
+        使上层 DataEngine 降级链切换到下一个数据源，而非静默拿到空 DataFrame。
+        仅当接口成功调用但确实无数据时才返回空 DataFrame。
+        """
         import pandas as pd
+
         try:
             import tushare as ts
+
             pro = ts.pro_api()
             all_rows = []
             for code in symbols:
                 ticker = code.split(".")[0] if "." in code else code
                 ts_code = f"{ticker}.SZ" if code.startswith(("0", "3")) else f"{ticker}.SH"
-                df = pro.moneyflow(ts_code=ts_code, start_date=start_date.replace("-",""), end_date=end_date.replace("-",""))
+                df = pro.moneyflow(
+                    ts_code=ts_code, start_date=start_date.replace("-", ""), end_date=end_date.replace("-", "")
+                )
                 if df is not None and not df.empty:
                     df = df.rename(columns={"net_mf_amount": "main_net_inflow"})
                     df["code"] = code
@@ -409,37 +396,77 @@ class TushareAdapter(BaseDataProvider):
             if not all_rows:
                 return pd.DataFrame()
             result = pd.concat(all_rows, ignore_index=True)
-            result["main_net_inflow_5d"] = result.groupby("code")["main_net_inflow"].rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+            result["main_net_inflow_5d"] = (
+                result.groupby("code")["main_net_inflow"]
+                .rolling(5, min_periods=1)
+                .mean()
+                .reset_index(level=0, drop=True)
+            )
             return result
+        except self._non_retriable:
+            raise  # 积分/限频错误：直接抛出，交由上层降级
+        except DataSourceError as e:
+            # 已分类的配额/限频错误（来自 _safe_call 内层），向上传递
+            raise
         except Exception as e:
+            classified = classify_tushare_error(e)
+            if isinstance(classified, (QuotaExceededError, RateLimitError)):
+                self._logger.warning(f"tushare 资金面数据获取失败(配额/限频，触发降级): {classified.message}")
+                raise classified from e
             self._logger.warning(f"tushare 资金面数据获取失败: {e}")
             return pd.DataFrame()
 
     def get_dragon_tiger(self, symbols, start_date, end_date, **kwargs):
-        """获取龙虎榜数据（tushare top_list接口）"""
+        """获取龙虎榜数据（tushare top_list接口）
+
+        积分门控（REQ-2026-0816-source-capability-verify R2）：
+        top_list 为高积分接口，积分不足时返回「没有接口(top_list)访问权限」类错误。
+        同 get_capital_flow，识别为 QuotaExceededError 重新抛出以触发降级，而非静默空返回。
+        """
         import pandas as pd
         from datetime import datetime, timedelta
+
         try:
             import tushare as ts
+
             pro = ts.pro_api()
-            end_dt = datetime.strptime(end_date.replace("-",""), "%Y%m%d")
+            end_dt = datetime.strptime(end_date.replace("-", ""), "%Y%m%d")
             check_dates = [(end_dt - timedelta(days=i)).strftime("%Y%m%d") for i in range(7)]
             all_rows = []
             for code in symbols:
                 found = False
                 ticker = code.split(".")[0] if "." in code else code
-                ts_code = f"{ticker}.SZ" if code.startswith(("0","3")) else f"{ticker}.SH"
+                ts_code = f"{ticker}.SZ" if code.startswith(("0", "3")) else f"{ticker}.SH"
                 for trade_date in check_dates:
                     df = pro.top_list(trade_date=trade_date)
                     if df is not None and not df.empty:
                         matched = df[df["ts_code"] == ts_code]
                         if not matched.empty:
                             row = matched.iloc[0]
-                            all_rows.append({"code": code, "trade_date": trade_date, "has_data": True, "reason": str(row.get("name","")), "net_buy": float(row.get("net_buy", 0)), "seats": ""})
+                            all_rows.append(
+                                {
+                                    "code": code,
+                                    "trade_date": trade_date,
+                                    "has_data": True,
+                                    "reason": str(row.get("name", "")),
+                                    "net_buy": float(row.get("net_buy", 0)),
+                                    "seats": "",
+                                }
+                            )
                             found = True
                 if not found:
-                    all_rows.append({"code": code, "trade_date": "", "has_data": False, "reason": "", "net_buy": 0.0, "seats": ""})
+                    all_rows.append(
+                        {"code": code, "trade_date": "", "has_data": False, "reason": "", "net_buy": 0.0, "seats": ""}
+                    )
             return pd.DataFrame(all_rows)
+        except self._non_retriable:
+            raise  # 积分/限频错误：直接抛出，交由上层降级
+        except DataSourceError as e:
+            raise
         except Exception as e:
+            classified = classify_tushare_error(e)
+            if isinstance(classified, (QuotaExceededError, RateLimitError)):
+                self._logger.warning(f"tushare 龙虎榜数据获取失败(配额/限频，触发降级): {classified.message}")
+                raise classified from e
             self._logger.warning(f"tushare 龙虎榜数据获取失败: {e}")
             return pd.DataFrame()

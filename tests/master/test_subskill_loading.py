@@ -7,6 +7,7 @@
 - 每个都暴露可调用的 run() 函数
 - mock 掉 sklearn/talib 等重量级第三方依赖
 """
+
 from __future__ import annotations
 
 import os
@@ -15,6 +16,14 @@ import importlib.util as ilu
 from unittest import mock
 
 import pytest
+
+# 本文件加载 portfolio-risk-engine / execution-monitor-engine 等子 Skill engine，
+# 其 import cvxpy/pypfopt 原生扩展在 Windows 同进程混合加载下会触发 access violation
+# 段错误（OPEN-2026-0814-13 原生 SDK 共存）。归入 heavy 批次以进程隔离运行，默认安全子集跳过。
+pytestmark = [
+    pytest.mark.heavy,
+    pytest.mark.requires_sklearn,
+]
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -41,8 +50,7 @@ def test_subskill_engine_loadable(name, rel_path):
     init_py = os.path.join(scripts_dir, "__init__.py")
 
     # 先清掉旧 scripts 缓存
-    saved = {k: sys.modules.get(k) for k in list(sys.modules.keys())
-             if k == "scripts" or k.startswith("scripts.")}
+    saved = {k: sys.modules.get(k) for k in list(sys.modules.keys()) if k == "scripts" or k.startswith("scripts.")}
     for key in list(sys.modules.keys()):
         if key == "scripts" or key.startswith("scripts."):
             sys.modules.pop(key, None)
@@ -50,7 +58,8 @@ def test_subskill_engine_loadable(name, rel_path):
     try:
         if os.path.exists(init_py):
             spec = ilu.spec_from_file_location(
-                "scripts", init_py,
+                "scripts",
+                init_py,
                 submodule_search_locations=[scripts_dir],
             )
             pkg = ilu.module_from_spec(spec)
@@ -60,8 +69,12 @@ def test_subskill_engine_loadable(name, rel_path):
         # mock 掉重量级第三方库（部分子 Skill 在 import 时尝试 import）
         # sklearn 需要拆成多个子模块（strategy-model-engine 顶层 from sklearn.ensemble import ...）
         for _m in (
-            "sklearn", "sklearn.linear_model", "sklearn.ensemble",
-            "sklearn.model_selection", "talib", "pandas_ta",
+            "sklearn",
+            "sklearn.linear_model",
+            "sklearn.ensemble",
+            "sklearn.model_selection",
+            "talib",
+            "pandas_ta",
         ):
             if _m not in sys.modules:
                 sys.modules[_m] = mock.MagicMock()

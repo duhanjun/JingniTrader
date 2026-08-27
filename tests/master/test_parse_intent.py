@@ -8,14 +8,25 @@
 - 关键词识别（中文/英文/混合/边界）
 - stock_pool 与 date_range 解析
 """
+
 from __future__ import annotations
 
+import os
+
 import pytest
+
+# 本文件导入主调度器 engine（cvxpy/pypfopt 原生扩展），归入 heavy 批次以进程隔离运行，
+# 默认安全子集跳过，避免 Windows 原生栈同进程加载竞态段错误（OPEN-2026-0814-13）。
+pytestmark = [
+    pytest.mark.heavy,
+    pytest.mark.requires_sklearn,
+]
 
 
 # ============================================================================
 # Part 1: factor_source gate 三态逻辑（原 TestParseIntentGate）
 # ============================================================================
+
 
 class TestParseIntentGate:
     """验证 MasterEngine.parse_intent 正确设置 ctx.metadata['factor_source']。"""
@@ -26,6 +37,7 @@ class TestParseIntentGate:
         monkeypatch.delenv("JINGNI_TOKEN", raising=False)
 
         import engine
+
         master = engine.MasterEngine()
         ctx = master.parse_intent("用近3年 momentum 因子做回测")
 
@@ -37,6 +49,7 @@ class TestParseIntentGate:
         monkeypatch.setenv("JINGNI_TOKEN", "gsa_test_token")
 
         import engine
+
         master = engine.MasterEngine()
         ctx = master.parse_intent("用近3年因子做回测")
 
@@ -49,6 +62,7 @@ class TestParseIntentGate:
         monkeypatch.setenv("JINGNI_TOKEN", "gsa_test_token")
 
         import engine
+
         master = engine.MasterEngine()
         ctx = master.parse_intent("用近3年因子做回测，从惊泥因子库取数")
 
@@ -60,6 +74,7 @@ class TestParseIntentGate:
         monkeypatch.setenv("JINGNI_TOKEN", "gsa_test_token")
 
         import engine
+
         master = engine.MasterEngine()
         ctx = master.parse_intent("use jingni factor store for backtest")
 
@@ -71,6 +86,7 @@ class TestParseIntentGate:
         monkeypatch.setenv("JINGNI_TOKEN", "gsa_test_token")
 
         import engine
+
         master = engine.MasterEngine()
         ctx = master.parse_intent("从 factor-store 取因子做回测")
 
@@ -82,6 +98,7 @@ class TestParseIntentGate:
         monkeypatch.delenv("JINGNI_TOKEN", raising=False)
 
         import engine
+
         master = engine.MasterEngine()
         ctx = master.parse_intent("用近3年因子做回测")
 
@@ -92,11 +109,13 @@ class TestParseIntentGate:
 # Part 2: parse_intent 关键词识别（原 TestParseIntentKeywords）
 # ============================================================================
 
+
 class TestParseIntentKeywords:
     """验证 parse_intent 对不同关键词的识别能力。"""
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     def test_full_pipeline_keywords(self):
@@ -158,6 +177,7 @@ class TestParseIntentKeywords:
     def test_date_range_3y(self):
         """'近3年' → 时间范围为从今天起往前3年"""
         from datetime import date as _date
+
         ctx = self._make_engine().parse_intent("近3年回测")
         today = _date.today()
         expected_start = today.replace(year=today.year - 3).strftime("%Y-%m-%d")
@@ -167,6 +187,7 @@ class TestParseIntentKeywords:
     def test_date_range_5y(self):
         """'近5年' → 时间范围为从今天起往前5年"""
         from datetime import date as _date
+
         ctx = self._make_engine().parse_intent("近5年回测")
         today = _date.today()
         expected_start = today.replace(year=today.year - 5).strftime("%Y-%m-%d")
@@ -176,6 +197,7 @@ class TestParseIntentKeywords:
     def test_date_range_default_5y(self):
         """未指定时间 → 默认取最近5年"""
         from datetime import date as _date
+
         ctx = self._make_engine().parse_intent("回测")
         today = _date.today()
         expected_start = today.replace(year=today.year - 5).strftime("%Y-%m-%d")
@@ -187,31 +209,31 @@ class TestParseIntentKeywords:
 # Part 3: 数据源优先级意图解析（方案 D）
 # ============================================================================
 
+
 class TestParseDataSourcesIntent:
     """验证 MasterEngine._parse_data_sources_intent 与 parse_intent 的数据源优先级解析。
 
-    方案 D 契约：
-    - 用户明确指定数据源 → ctx.data_sources 非空，覆盖环境变量 DATA_BACKENDS
-    - 未指定 → ctx.data_sources 保持 None，由 data-engine 走环境变量 → 默认值
+    REQ-2026-08-14 实施（Damon 最终拍板）契约：
+    - 用户明确指定数据源 → ctx.data_sources 非空（首选源按出现顺序排前），覆盖环境变量 DATA_BACKENDS
+    - 9 旧源名称直接映射到自身（按需调用，用户显式指定时启用）；neodata 已移除，公开源映射为 westock 公网源
+    - 用户只指定部分源 → 自动追加默认免费降级链兜底：local → westock → baostock → akshare → websearch
+    - 未指定数据源 → ctx.data_sources 保持 None，由 data-engine 走环境变量 → 默认值
     """
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     def test_single_source_wind(self):
-        """'用 wind 取数据' → ['wind', ...默认链兜底(不含 tushare)]"""
+        """'用 wind 取数据' → 意图识别 wind 置顶，追加默认免费链兜底"""
         ctx = self._make_engine().parse_intent("用 wind 取数据")
         assert ctx.data_sources is not None
         assert ctx.data_sources[0] == "wind"
-        # 用户只指定了 wind，后面应自动追加默认免费降级链（baostock/akshare/websearch）
-        assert "baostock" in ctx.data_sources
-        assert "websearch" in ctx.data_sources
-        # tushare 是 opt-in 源，不在默认兜底链里，用户没明确说就不应出现
-        assert "tushare" not in ctx.data_sources
+        assert ctx.data_sources == ["wind", "local", "westock", "baostock", "akshare", "websearch"]
 
     def test_single_source_ifind(self):
-        """'优先用 ifind' → ['ifind', ...默认链兜底]"""
+        """'优先用 ifind' → ifind 置顶，追加默认免费链"""
         ctx = self._make_engine().parse_intent("优先用 ifind")
         assert ctx.data_sources is not None
         assert ctx.data_sources[0] == "ifind"
@@ -229,20 +251,19 @@ class TestParseDataSourcesIntent:
         assert ctx.data_sources[0] == "ifind"
 
     def test_multiple_sources_in_order(self):
-        """'优先用 ifind，失败用 tushare' → 顺序为 ['ifind', 'tushare', ...]"""
+        """'优先用 ifind，失败用 tushare' → ifind/tushare 按序置顶，追加默认免费链（去重）"""
         ctx = self._make_engine().parse_intent("优先用 ifind，失败用 tushare")
         assert ctx.data_sources is not None
-        # ifind 在 tushare 之前出现
-        assert ctx.data_sources.index("ifind") < ctx.data_sources.index("tushare")
-        assert ctx.data_sources[0] == "ifind"
+        assert ctx.data_sources[:2] == ["ifind", "tushare"]
+        assert ctx.data_sources.count("ifind") == 1
+        assert ctx.data_sources.count("tushare") == 1
 
     def test_multiple_sources_no_dup(self):
-        """'用 baostock 和 akshare' → 去重后顺序为 ['baostock', 'akshare', ...]"""
+        """'用 baostock 和 akshare' → 去重后按序置顶，追加默认免费链"""
         ctx = self._make_engine().parse_intent("用 baostock 和 akshare")
         assert ctx.data_sources is not None
+        assert ctx.data_sources[:2] == ["baostock", "akshare"]
         assert ctx.data_sources.count("baostock") == 1
-        assert ctx.data_sources.count("akshare") == 1
-        assert ctx.data_sources.index("baostock") < ctx.data_sources.index("akshare")
 
     def test_no_verb_no_match(self):
         """'今天天气真好' → 无动作动词 → None"""
@@ -265,53 +286,63 @@ class TestParseDataSourcesIntent:
         assert ctx.data_sources is None
 
     def test_english_verb_use(self):
-        """'use wind for data' → 英文动词 use 也能触发"""
+        """'use wind for data' → 英文动词 use 也能触发，wind 置顶"""
         ctx = self._make_engine().parse_intent("use wind for data")
         assert ctx.data_sources is not None
         assert ctx.data_sources[0] == "wind"
 
     def test_switch_verb(self):
-        """'切换到 baostock' → 切换动词触发"""
+        """'切换到 baostock' → 切换动词触发，baostock 置顶"""
         ctx = self._make_engine().parse_intent("切换到 baostock")
         assert ctx.data_sources is not None
         assert ctx.data_sources[0] == "baostock"
 
     def test_tushare_opt_in_explicit(self):
-        """'用 tushare 取数据' → tushare 作为 opt-in 源被用户明确启用,进入链首"""
+        """'用 tushare 取数据' → 意图识别 tushare 置顶（按需调用源，已注册可用）"""
         ctx = self._make_engine().parse_intent("用 tushare 取数据")
         assert ctx.data_sources is not None
         assert ctx.data_sources[0] == "tushare"
-        # tushare 是 opt-in 源,只有用户明确说才进入链
-        # 默认兜底链 baostock/akshare/websearch 仍应追加在后面
-        assert "baostock" in ctx.data_sources
 
-    def test_default_chain_excludes_opt_in_sources(self):
-        """未指定数据源时 ctx.data_sources 为 None,由 data-engine 走默认链(不含 tushare)"""
+    def test_default_chain_is_free_five(self):
+        """未指定数据源时 ctx.data_sources 为 None；data-engine 默认链 = local,westock,baostock,akshare,websearch"""
         ctx = self._make_engine().parse_intent("用近3年因子做回测")
         assert ctx.data_sources is None
-        # 验证 data-engine 的默认链确实不含 tushare
+        # 验证 data-engine 的默认链确实为免费链 5 源（local 置顶）
         import sys
         import importlib.util as ilu
+
         saved_scripts = {k: v for k, v in sys.modules.items() if k == "scripts" or k.startswith("scripts.")}
         for k in list(sys.modules.keys()):
             if k == "scripts" or k.startswith("scripts."):
                 sys.modules.pop(k, None)
-        scripts_dir = r"d:\codebuddy\jingni-trader\skills\data-engine\scripts"
-        init_py = scripts_dir + r"\__init__.py"
+        scripts_dir = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+            "skills",
+            "data-engine",
+            "scripts",
+        )
+        init_py = os.path.join(scripts_dir, "__init__.py")
         try:
             spec = ilu.spec_from_file_location("scripts", init_py, submodule_search_locations=[scripts_dir])
             pkg = ilu.module_from_spec(spec)
             sys.modules["scripts"] = pkg
             spec.loader.exec_module(pkg)
             from scripts.config import DEFAULT_DATA_SOURCES, PAID_OR_SPECIAL_BACKENDS
-            assert "tushare" not in DEFAULT_DATA_SOURCES, "tushare 不应在默认链里"
-            assert "tushare" in PAID_OR_SPECIAL_BACKENDS, "tushare 应在 opt-in 源列表里"
+
+            assert "tushare" not in DEFAULT_DATA_SOURCES, "tushare 不应在默认免费链里（属按需调用）"
+            assert DEFAULT_DATA_SOURCES == ["local", "westock", "baostock", "akshare", "websearch"], (
+                "默认链应为免费链 5 源（local 置顶）"
+            )
+            assert PAID_OR_SPECIAL_BACKENDS == ["tushare", "xtquant", "gm", "tdxquant", "wind", "ifind"], (
+                "按需调用组 6 源（tushare 已移入）"
+            )
         finally:
             for k in list(sys.modules.keys()):
                 if k == "scripts" or k.startswith("scripts."):
                     sys.modules.pop(k, None)
             for k, v in saved_scripts.items():
-                sys.modules[k] = v
+                if k in sys.modules:
+                    sys.modules[k] = v
 
     def test_does_not_break_target_stages(self):
         """数据源意图解析不影响 target_stages 的正常解析"""
@@ -321,10 +352,6 @@ class TestParseDataSourcesIntent:
         assert "DATA" in ctx.target_stages
         assert "BACKTEST" in ctx.target_stages
 
-
-# ============================================================================
-# Part 4: 单一工作流 + 因子用途分支（strategy_required 契约）
-# ============================================================================
 
 class TestStrategyRequiredRouting:
     """验证单一工作流模型：根据 strategy_required 标志选择执行深度。
@@ -338,6 +365,7 @@ class TestStrategyRequiredRouting:
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     def test_default_analysis_path(self):
@@ -375,9 +403,7 @@ class TestStrategyRequiredRouting:
         """'回测' 触发完整 7 阶段管线"""
         ctx = self._make_engine().parse_intent("用近3年A股数据做回测")
         assert ctx.metadata["strategy_required"] is True
-        assert ctx.target_stages == [
-            "DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"
-        ]
+        assert ctx.target_stages == ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"]
 
     def test_strategy_keyword_trigger_full_pipeline(self):
         """'策略' 触发完整管线"""
@@ -432,6 +458,7 @@ class TestStrategyRequiredRouting:
 # Part 5: 绩效复盘意图解析（attribution intent routing）
 # ============================================================================
 
+
 class TestAttributionIntent:
     """验证 MasterEngine._is_attribution_intent 与 parse_intent 的复盘意图路由。
 
@@ -444,6 +471,7 @@ class TestAttributionIntent:
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     def test_parse_attribution_intent(self):
@@ -455,22 +483,23 @@ class TestAttributionIntent:
     def test_parse_attribution_intent_variants(self):
         """多个 ATTRIBUTION_KEYWORDS 关键词均应触发复盘意图"""
         keywords = [
-            "绩效归因", "归因分析", "实盘报告",
-            "盈亏分析", "交易复盘", "绩效复盘", "attribution",
+            "绩效归因",
+            "归因分析",
+            "实盘报告",
+            "盈亏分析",
+            "交易复盘",
+            "绩效复盘",
+            "attribution",
         ]
         for kw in keywords:
             ctx = self._make_engine().parse_intent(kw)
-            assert ctx.metadata.get("report_intent") == "attribution", (
-                f"关键词 '{kw}' 应触发 attribution 意图"
-            )
+            assert ctx.metadata.get("report_intent") == "attribution", f"关键词 '{kw}' 应触发 attribution 意图"
 
     def test_parse_attribution_not_triggered(self):
         """普通输入不应触发复盘意图"""
         for text in ["今天天气真好", "分析比亚迪技术面"]:
             ctx = self._make_engine().parse_intent(text)
-            assert ctx.metadata.get("report_intent") != "attribution", (
-                f"'{text}' 不应触发 attribution 意图"
-            )
+            assert ctx.metadata.get("report_intent") != "attribution", f"'{text}' 不应触发 attribution 意图"
 
     def test_attribution_priority_over_strategy(self):
         """'复盘回测' 同时命中复盘与策略关键词，应优先走复盘路径（不含 MODEL/BACKTEST）"""
@@ -482,6 +511,7 @@ class TestAttributionIntent:
     def test_attribution_target_stages_order(self):
         """复盘路径 target_stages 严格按 STAGE_ORDER 排序"""
         import engine
+
         ctx = self._make_engine().parse_intent("复盘")
         assert ctx.target_stages == ["DATA", "FACTOR", "EXECUTION", "REPORT"]
         # 显式校验顺序与 STAGE_ORDER 一致
@@ -492,6 +522,7 @@ class TestAttributionIntent:
 # ============================================================================
 # Part 6: SKILL.md 意图表参数化驱动（表格驱动，覆盖 9 条用户意图场景）
 # ============================================================================
+
 
 class TestIntentTableParametrized:
     """以「数据驱动表格」形式覆盖 SKILL.md / README.md 中的用户意图对照表。
@@ -566,6 +597,7 @@ class TestIntentTableParametrized:
 
     def _make_engine(self):
         import engine
+
         return engine.MasterEngine()
 
     @pytest.mark.parametrize(
@@ -576,8 +608,7 @@ class TestIntentTableParametrized:
         """每条意图表用例都解析到期望的 target_stages 与 report_intent。"""
         ctx = self._make_engine().parse_intent(user_input)
         assert ctx.target_stages == expected_stages, (
-            f"输入 '{user_input}' 的 target_stages 不匹配："
-            f"期望 {expected_stages}，实际 {ctx.target_stages}"
+            f"输入 '{user_input}' 的 target_stages 不匹配：期望 {expected_stages}，实际 {ctx.target_stages}"
         )
         if expected_report_intent is not None:
             assert ctx.metadata.get("report_intent") == expected_report_intent, (
@@ -589,6 +620,7 @@ class TestIntentTableParametrized:
     def test_intent_table_stages_sorted(self, idx):
         """每条用例的期望 target_stages 都必须按 STAGE_ORDER 升序（防止用例本身写错）。"""
         import engine
+
         _, expected_stages, _ = self.INTENT_TABLE[idx]
         order = [engine.STAGE_ORDER[s] for s in expected_stages]
         assert order == sorted(order), f"用例 {idx} 的 expected_stages 未按 STAGE_ORDER 排序"

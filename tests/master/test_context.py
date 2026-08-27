@@ -6,6 +6,7 @@
 - Context to_json / from_json 往返保持字段一致
 - get_artifact 未注册返回 None
 """
+
 from __future__ import annotations
 
 import pytest
@@ -15,6 +16,7 @@ class TestContextApi:
     def test_context_roundtrip_json(self):
         """Context to_json / from_json 往返保持字段一致"""
         from scripts.context import Context
+
         ctx = Context(
             task_id="t1",
             user_intent="测试",
@@ -35,6 +37,7 @@ class TestContextApi:
     def test_context_get_artifact_missing(self):
         """get_artifact 未注册 → None"""
         from scripts.context import Context
+
         ctx = Context()
         assert ctx.get_artifact("NOT_EXIST") is None
 

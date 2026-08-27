@@ -11,10 +11,12 @@
 - QUANT_QUALITY_GATE_FRESHNESS_ABORT_DAYS（默认 10）
 - QUANT_QUALITY_GATE_FRESHNESS_DEGRADED_DAYS（默认 5）
 """
+from __future__ import annotations
+
 import logging
 import os
 from dataclasses import dataclass, field
-from typing import Dict, List, Literal, Optional
+from typing import Dict, List, Literal
 
 import pandas as pd
 
@@ -26,21 +28,36 @@ logger = logging.getLogger("quality-gate")
 # ============================================================================
 
 # P0-2.2 CORE 表：缺失即整体失败
-STANDARD_CORE_TABLES = frozenset({
-    "stock_basic",      # 股票基础信息（上市日、行业、ST 标记）
-    "daily",            # 日线行情（OHLCV）
-    "daily_basic",      # 日线指标（PE/PB/换手率）
-    "adj_factor",       # 复权因子
-    "fina_indicator",   # 财务指标
-    "trade_cal",        # 交易日历
-})
+STANDARD_CORE_TABLES = frozenset(
+    {
+        "stock_basic",  # 股票基础信息（上市日、行业、ST 标记）
+        "daily",  # 日线行情（OHLCV）
+        "daily_basic",  # 日线指标（PE/PB/换手率）
+        "adj_factor",  # 复权因子
+        "fina_indicator",  # 财务指标
+        "trade_cal",  # 交易日历
+    }
+)
 
 # P0-2.2 OPTIONAL 表：缺失仅降级
-STANDARD_OPTIONAL_TABLES = frozenset({
-    "forecast", "news", "top_list", "moneyflow", "margin",
-    "hk_hold", "index_weight", "limit_list", "concept",
-    "announcement", "express", "div", "fina_audit", "hold_ctrl",
-})
+STANDARD_OPTIONAL_TABLES = frozenset(
+    {
+        "forecast",
+        "news",
+        "top_list",
+        "moneyflow",
+        "margin",
+        "hk_hold",
+        "index_weight",
+        "limit_list",
+        "concept",
+        "announcement",
+        "express",
+        "div",
+        "fina_audit",
+        "hold_ctrl",
+    }
+)
 
 # jingni-trader 适配：data-engine 实际产物的 artifact_key → PRD 标准表名
 # data-engine 落盘 cleaned_data.parquet / financial.parquet / capital_flow.parquet 等，
@@ -60,6 +77,7 @@ _ALIAS_TO_STANDARD = {
 # 判定结果
 # ============================================================================
 
+
 @dataclass
 class QualityVerdict:
     """质量门判定结果（PRD P0-2.3）。
@@ -72,6 +90,7 @@ class QualityVerdict:
         pit_warnings: P0-1 PIT 扫描产出的违规记录
         reason: 人类可读的判定原因
     """
+
     mode: Literal["normal", "degraded", "abort"]
     missing_core: List[str] = field(default_factory=list)
     missing_optional: List[str] = field(default_factory=list)
@@ -94,6 +113,7 @@ class QualityVerdict:
 # 质量门
 # ============================================================================
 
+
 class DataQualityGate:
     """三态数据质量门（PRD P0-2.1）。
 
@@ -114,9 +134,9 @@ class DataQualityGate:
 
     def __init__(
         self,
-        core_required: Optional[List[str]] = None,
-        freshness_abort_days: Optional[int] = None,
-        freshness_degraded_days: Optional[int] = None,
+        core_required: List[str] | None = None,
+        freshness_abort_days: int | None = None,
+        freshness_degraded_days: int | None = None,
     ):
         # jingni-trader 适配默认：daily 为唯一硬性 core
         # （fina_indicator 缺失时下游因子计算可降级到纯价格因子，故不强制）
@@ -136,7 +156,7 @@ class DataQualityGate:
         return _ALIAS_TO_STANDARD.get(name, name)
 
     @staticmethod
-    def _is_empty(df: Optional[pd.DataFrame]) -> bool:
+    def _is_empty(df: pd.DataFrame | None) -> bool:
         """判断 DataFrame 是否为空（None 或 empty）"""
         if df is None:
             return True
@@ -145,7 +165,7 @@ class DataQualityGate:
         return False
 
     @staticmethod
-    def _compute_freshness(daily_df: Optional[pd.DataFrame], asof: str) -> int:
+    def _compute_freshness(daily_df: pd.DataFrame | None, asof: str) -> int:
         """计算 daily 表最新交易日距离 asof 的自然日数（近似交易日）。
 
         asof 是 YYYYMMDD 格式。返回非负整数。
@@ -168,7 +188,7 @@ class DataQualityGate:
         self,
         tables: Dict[str, pd.DataFrame],
         asof: str,
-        pit_warnings: Optional[List[Dict]] = None,
+        pit_warnings: List[Dict] | None = None,
     ) -> QualityVerdict:
         """检查已拉取的 DataFrame 字典，返回三态判定结果。
 
@@ -187,10 +207,9 @@ class DataQualityGate:
         normalized = {self._normalize_table_name(k): v for k, v in tables.items()}
 
         # P0-2.4 检查 core 表缺失
-        missing_core = sorted([
-            t for t in self.core_required
-            if t not in normalized or self._is_empty(normalized.get(t))
-        ])
+        missing_core = sorted(
+            [t for t in self.core_required if t not in normalized or self._is_empty(normalized.get(t))]
+        )
 
         # P0-2.4 检查 optional 表缺失（仅记录实际传入但为空的）
         missing_optional = []

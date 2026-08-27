@@ -8,6 +8,7 @@
 - IncidentFSM 重试上限
 - 非严格模式（QUANT_FSM_STRICT_MODE=false）
 """
+
 from __future__ import annotations
 
 import pytest
@@ -17,10 +18,12 @@ import pytest
 # DailyFSM 合法转移
 # ============================================================================
 
+
 class TestDailyFSMLegalTransitions:
     def test_main_path_full(self):
         """主路径完整转移：INITIALIZED→DATA→...→REPORT"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         path = ["DATA", "FACTOR", "MODEL", "BACKTEST", "PORTFOLIO", "EXECUTION", "REPORT"]
         current = "INITIALIZED"
@@ -32,6 +35,7 @@ class TestDailyFSMLegalTransitions:
     def test_analysis_path(self):
         """分析路径：INITIALIZED→DATA→FACTOR→REPORT"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FACTOR")
@@ -42,6 +46,7 @@ class TestDailyFSMLegalTransitions:
     def test_degraded_recoverable(self):
         """DEGRADED 非终态，可恢复到 REPORT"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "DEGRADED")
@@ -52,6 +57,7 @@ class TestDailyFSMLegalTransitions:
     def test_degraded_to_factor_retry(self):
         """DEGRADED → FACTOR 恢复重试"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FACTOR")
@@ -66,6 +72,7 @@ class TestDailyFSMLegalTransitions:
         原出边缺失 EXECUTION 会触发非法转移并放大级联红灯。
         """
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FACTOR")
@@ -81,6 +88,7 @@ class TestDailyFSMLegalTransitions:
     def test_portfolio_failed_to_degraded_then_execution_pipeline(self):
         """OPEN-2026-020 端到端：PORTFOLIO→DEGRADED→EXECUTION→REPORT 全链合法。"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = "INITIALIZED"
         for stage in ["DATA", "FACTOR", "BACKTEST", "PORTFOLIO"]:
@@ -95,10 +103,12 @@ class TestDailyFSMLegalTransitions:
 # DailyFSM 非法转移
 # ============================================================================
 
+
 class TestDailyFSMIllegalTransitions:
     def test_illegal_backward_jump(self):
         """非法后向跳转 BACKTEST→FACTOR raise"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FACTOR")
@@ -109,6 +119,7 @@ class TestDailyFSMIllegalTransitions:
     def test_illegal_factor_to_initialized(self):
         """非法后向跳转 FACTOR→INITIALIZED raise"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FACTOR")
@@ -118,6 +129,7 @@ class TestDailyFSMIllegalTransitions:
     def test_manual_attention_terminal(self):
         """MANUAL_ATTENTION 终态：任何转移 raise"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "MANUAL_ATTENTION")
@@ -128,6 +140,7 @@ class TestDailyFSMIllegalTransitions:
     def test_report_terminal(self):
         """REPORT 终态：任何转移 raise"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FACTOR")
@@ -138,6 +151,7 @@ class TestDailyFSMIllegalTransitions:
     def test_failed_terminal(self):
         """FAILED 终态：任何转移 raise"""
         from scripts.fsm import DailyFSM
+
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
         current = fsm.transition(current, "FAILED")
@@ -149,10 +163,12 @@ class TestDailyFSMIllegalTransitions:
 # 非严格模式
 # ============================================================================
 
+
 class TestFSMNonStrictMode:
     def test_non_strict_mode_warns_not_raises(self, monkeypatch):
         """QUANT_FSM_STRICT_MODE=false 时非法转移仅 warning"""
         from scripts.fsm import DailyFSM
+
         monkeypatch.setenv("QUANT_FSM_STRICT_MODE", "false")
         fsm = DailyFSM()
         current = fsm.transition("INITIALIZED", "DATA")
@@ -165,10 +181,12 @@ class TestFSMNonStrictMode:
 # IncidentFSM 重试回路
 # ============================================================================
 
+
 class TestIncidentFSM:
     def test_retry_loop(self):
         """重试回路：CLASSIFIED → RETRYING → CLASSIFIED"""
         from scripts.fsm import IncidentFSM
+
         incident = IncidentFSM()
         incident.transition("DETECTED", "CLASSIFIED")
         incident.transition("CLASSIFIED", "RETRYING")
@@ -179,6 +197,7 @@ class TestIncidentFSM:
     def test_retry_limit_to_degraded(self):
         """重试上限 → 强制 DEGRADED"""
         from scripts.fsm import IncidentFSM
+
         incident = IncidentFSM()
         incident.transition("DETECTED", "CLASSIFIED")
         # 第一次重试
@@ -192,6 +211,7 @@ class TestIncidentFSM:
     def test_direct_resolved(self):
         """直接解决：DETECTED → CLASSIFIED → RESOLVED"""
         from scripts.fsm import IncidentFSM
+
         incident = IncidentFSM()
         incident.transition("DETECTED", "CLASSIFIED")
         incident.transition("CLASSIFIED", "RESOLVED")
@@ -200,6 +220,7 @@ class TestIncidentFSM:
     def test_manual_attention_terminal(self):
         """Incident MANUAL_ATTENTION 终态"""
         from scripts.fsm import IncidentFSM
+
         incident = IncidentFSM()
         incident.transition("DETECTED", "CLASSIFIED")
         incident.transition("CLASSIFIED", "MANUAL_ATTENTION")
@@ -210,6 +231,7 @@ class TestIncidentFSM:
     def test_illegal_incident_transition(self):
         """非法 Incident 转移 raise"""
         from scripts.fsm import IncidentFSM
+
         incident = IncidentFSM()
         with pytest.raises(ValueError, match="illegal"):
             incident.transition("DETECTED", "RESOLVED")  # DETECTED 只能到 CLASSIFIED
@@ -219,15 +241,18 @@ class TestIncidentFSM:
 # 状态枚举完整性
 # ============================================================================
 
+
 class TestStateEnums:
     def test_all_states_count(self):
         """11 状态"""
         from scripts.fsm import ALL_STATES
+
         assert len(ALL_STATES) == 11
 
     def test_terminal_states(self):
         """3 终态：REPORT / FAILED / MANUAL_ATTENTION"""
         from scripts.fsm import TERMINAL_STATES
+
         assert TERMINAL_STATES == {"REPORT", "FAILED", "MANUAL_ATTENTION"}
 
 

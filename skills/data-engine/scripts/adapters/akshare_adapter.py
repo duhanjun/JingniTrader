@@ -2,30 +2,25 @@
 AkShare 数据源适配器
 免费另类数据源，支持龙虎榜、大宗交易、北向资金等特色数据
 """
+
 import logging
-from typing import List, Optional
+from typing import List
 import pandas as pd
 import akshare as ak
 
-from ..base.base_data_provider import BaseDataProvider
+from scripts.base.base_data_provider import BaseDataProvider
+from scripts.errors import DataNotFoundError, InvalidParameterError
 
 
 class AkshareAdapter(BaseDataProvider):
     """AkShare 适配器，专注于另类数据和补充数据源"""
 
-    SUPPORTED_DATA_TYPES = {"daily", "financial", "capital_flow",
-                            "dragon_tiger", "shareholder"}
+    SUPPORTED_DATA_TYPES = {"daily", "kline", "financial", "capital_flow", "dragon_tiger", "shareholder"}
 
     def __init__(self):
         self._logger = logging.getLogger(self.__class__.__name__)
 
-    def get_daily(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str,
-        adjust: str = "hfq"
-    ) -> pd.DataFrame:
+    def get_daily(self, symbols: List[str], start_date: str, end_date: str, adjust: str = "hfq") -> pd.DataFrame:
         """
         获取日线行情（通过 stock_zh_a_hist 接口）
 
@@ -50,36 +45,11 @@ class AkshareAdapter(BaseDataProvider):
                         period=period,
                         start_date=start,
                         end_date=end,
-                        adjust="qfq" if adjust in ("qfq", "hfq") else "",
+                        adjust=adjust if adjust in ("qfq", "hfq") else "",
                     )
                     if df is not None and not df.empty:
-                        df = df.rename(columns={
-                            "日期": "date",
-                            "开盘": "open",
-                            "收盘": "close",
-                            "最高": "high",
-                            "最低": "low",
-                            "成交量": "volume",
-                            "成交额": "amount",
-                            "振幅": "amplitude",
-                            "涨跌幅": "change_pct",
-                            "涨跌额": "change",
-                            "换手率": "turnover_rate",
-                        })
-                else:
-                    # 优先用东方财富接口 stock_zh_a_hist；若该接口对该标的失败
-                    #（例如科创板个股偶发 RemoteDisconnected/连接被关闭），
-                    # 自动回退到腾讯/新浪接口 stock_zh_a_daily，保证数据可取。
-                    try:
-                        df = ak.stock_zh_a_hist(
-                            symbol=ticker,
-                            period=period,
-                            start_date=start,
-                            end_date=end,
-                            adjust=adjust
-                        )
-                        if df is not None and not df.empty:
-                            df = df.rename(columns={
+                        df = df.rename(
+                            columns={
                                 "日期": "date",
                                 "开盘": "open",
                                 "收盘": "close",
@@ -91,7 +61,32 @@ class AkshareAdapter(BaseDataProvider):
                                 "涨跌幅": "change_pct",
                                 "涨跌额": "change",
                                 "换手率": "turnover_rate",
-                            })
+                            }
+                        )
+                else:
+                    # 优先用东方财富接口 stock_zh_a_hist；若该接口对该标的失败
+                    # （例如科创板个股偶发 RemoteDisconnected/连接被关闭），
+                    # 自动回退到腾讯/新浪接口 stock_zh_a_daily，保证数据可取。
+                    try:
+                        df = ak.stock_zh_a_hist(
+                            symbol=ticker, period=period, start_date=start, end_date=end, adjust=adjust
+                        )
+                        if df is not None and not df.empty:
+                            df = df.rename(
+                                columns={
+                                    "日期": "date",
+                                    "开盘": "open",
+                                    "收盘": "close",
+                                    "最高": "high",
+                                    "最低": "low",
+                                    "成交量": "volume",
+                                    "成交额": "amount",
+                                    "振幅": "amplitude",
+                                    "涨跌幅": "change_pct",
+                                    "涨跌额": "change",
+                                    "换手率": "turnover_rate",
+                                }
+                            )
                     except Exception as _em_err:
                         self._logger.warning(
                             f"AkShare stock_zh_a_hist 获取 {code} 失败: {_em_err}，回退 stock_zh_a_daily(腾讯/新浪)"
@@ -100,12 +95,14 @@ class AkshareAdapter(BaseDataProvider):
 
                     if df is None or df.empty:
                         # 回退接口：stock_zh_a_daily（腾讯/新浪，symbol 形如 sh600000 / sz000001）
-                        prefix = "sh" if ticker.startswith(("6", "9")) else "sz" if ticker.startswith(("0", "3")) else "bj"
+                        prefix = (
+                            "sh" if ticker.startswith(("6", "9")) else "sz" if ticker.startswith(("0", "3")) else "bj"
+                        )
                         fallback_symbol = f"{prefix}{ticker}"
                         try:
                             df_raw = ak.stock_zh_a_daily(
                                 symbol=fallback_symbol,
-                                adjust="qfq" if adjust in ("qfq", "hfq") else "",
+                                adjust=adjust if adjust in ("qfq", "hfq") else "",
                             )
                             if df_raw is None or df_raw.empty:
                                 continue
@@ -116,19 +113,19 @@ class AkshareAdapter(BaseDataProvider):
                                 df_raw = df_raw[df_raw["date"] >= pd.to_datetime(start_date)]
                             if end_date:
                                 df_raw = df_raw[df_raw["date"] <= pd.to_datetime(end_date)]
-                            df = df_raw.rename(columns={
-                                "date": "date",
-                                "open": "open",
-                                "close": "close",
-                                "high": "high",
-                                "low": "low",
-                                "volume": "volume",
-                                "amount": "amount",
-                            })
-                        except Exception as _fallback_err:
-                            self._logger.warning(
-                                f"AkShare stock_zh_a_daily 回退获取 {code} 也失败: {_fallback_err}"
+                            df = df_raw.rename(
+                                columns={
+                                    "date": "date",
+                                    "open": "open",
+                                    "close": "close",
+                                    "high": "high",
+                                    "low": "low",
+                                    "volume": "volume",
+                                    "amount": "amount",
+                                }
                             )
+                        except Exception as _fallback_err:
+                            self._logger.warning(f"AkShare stock_zh_a_daily 回退获取 {code} 也失败: {_fallback_err}")
                             continue
                 if df is None or df.empty:
                     continue
@@ -152,6 +149,148 @@ class AkshareAdapter(BaseDataProvider):
         result["change_pct"] = pd.to_numeric(result["change_pct"], errors="coerce")
         result["turnover_rate"] = pd.to_numeric(result["turnover_rate"], errors="coerce")
         return result
+
+    # ── 全粒度 K 线（REQ-2026-08-15 行情全粒度接入）────────────
+    # akshare 真实支持：day(stock_zh_a_hist period=daily) /
+    #   week(stock_zh_a_hist period=weekly) / month(stock_zh_a_hist period=monthly) /
+    #   m5/m15/m30/m60(stock_zh_a_hist_min_em period=5/15/30/60)。
+    # m1/season/year：底层接口不支持 → 抛 InvalidParameterError 触发降级。
+    _KLINE_DAILY_PERIOD: dict = {"day": "daily", "week": "weekly", "month": "monthly"}
+    _KLINE_MINUTE_PERIOD: dict = {"m5": "5", "m15": "15", "m30": "30", "m60": "60"}
+
+    def get_kline(
+        self,
+        symbols: List[str],
+        period: str = "day",
+        start_date: str = "",
+        end_date: str = "",
+        adjust: str = "qfq",
+    ) -> pd.DataFrame:
+        """获取任意周期 K 线（akshare 通道）。
+
+        day → 复用 get_daily（含 stock_zh_a_hist + 腾讯/新浪回退链）。
+        week/month → stock_zh_a_hist(period=weekly/monthly)。
+        m5/m15/m30/m60 → stock_zh_a_hist_min_em（东方财富分钟线）。
+        归一化到标准化 K 线契约（code/date/open/high/low/close/volume/amount）。
+        失败（网络/接口漂移）抛 DataNotFoundError 触发降级。
+        """
+        if period in ("day", ""):
+            return self.get_daily(symbols, start_date, end_date, adjust=adjust)
+
+        if period in self._KLINE_DAILY_PERIOD:
+            return self._get_kline_daily(symbols, period, start_date, end_date, adjust)
+        if period in self._KLINE_MINUTE_PERIOD:
+            return self._get_kline_minute(symbols, period, start_date, end_date, adjust)
+
+        raise InvalidParameterError(
+            "akshare",
+            f"akshare 不支持周期 {period}（仅 day/week/month/m5/m15/m30/m60）；m1/season/year 请降级至其他源。",
+        )
+
+    def _get_kline_daily(self, symbols, period, start_date, end_date, adjust):
+        """week/month 经 stock_zh_a_hist(period=weekly/monthly) 取数。"""
+        start = (start_date or "").replace("-", "")
+        end = (end_date or "").replace("-", "")
+        period_arg = self._KLINE_DAILY_PERIOD[period]
+        adjust_arg = adjust if adjust in ("qfq", "hfq") else ""
+        frames = []
+        for code in symbols:
+            try:
+                ticker = self._extract_ticker(code)
+                if self._is_etf_code(ticker):
+                    df = ak.fund_etf_hist_em(
+                        symbol=ticker,
+                        period=period_arg,
+                        start_date=start,
+                        end_date=end,
+                        adjust=adjust_arg,
+                    )
+                else:
+                    df = ak.stock_zh_a_hist(
+                        symbol=ticker,
+                        period=period_arg,
+                        start_date=start,
+                        end_date=end,
+                        adjust=adjust_arg,
+                    )
+                if df is None or df.empty:
+                    continue
+                df = df.rename(
+                    columns={
+                        "日期": "date",
+                        "开盘": "open",
+                        "收盘": "close",
+                        "最高": "high",
+                        "最低": "low",
+                        "成交量": "volume",
+                        "成交额": "amount",
+                    }
+                )
+                df["code"] = code
+                frames.append(df)
+            except Exception as e:
+                self._logger.warning(f"AkShare 周期 {period} 获取 {code} 失败: {e}")
+                continue
+        if not frames:
+            raise DataNotFoundError("akshare", f"akshare 未返回 {symbols} 周期 {period} 的 K 线数据")
+        return self._normalize_kline_frames(frames)
+
+    def _get_kline_minute(self, symbols, period, start_date, end_date, adjust):
+        """m5/m15/m30/m60 经 stock_zh_a_hist_min_em 取数（东方财富）。"""
+        start = (start_date or "").replace("-", "")
+        end = (end_date or "").replace("-", "")
+        period_arg = self._KLINE_MINUTE_PERIOD[period]
+        adjust_arg = adjust if adjust in ("qfq", "hfq") else ""
+        frames = []
+        for code in symbols:
+            try:
+                ticker = self._extract_ticker(code)
+                df = ak.stock_zh_a_hist_min_em(
+                    symbol=ticker,
+                    period=period_arg,
+                    start_date=start,
+                    end_date=end,
+                    adjust=adjust_arg,
+                )
+                if df is None or df.empty:
+                    continue
+                df = df.rename(
+                    columns={
+                        "时间": "date",
+                        "开盘": "open",
+                        "收盘": "close",
+                        "最高": "high",
+                        "最低": "low",
+                        "成交量": "volume",
+                        "成交额": "amount",
+                    }
+                )
+                df["code"] = code
+                frames.append(df)
+            except Exception as e:
+                self._logger.warning(f"AkShare 分钟 {period} 获取 {code} 失败: {e}")
+                continue
+        if not frames:
+            raise DataNotFoundError("akshare", f"akshare 未返回 {symbols} 分钟周期 {period} 的 K 线数据")
+        return self._normalize_kline_frames(frames)
+
+    @staticmethod
+    def _normalize_kline_frames(frames):
+        """合并 + 类型归一化到标准化 K 线契约。"""
+        result = pd.concat(frames, ignore_index=True)
+        result["date"] = pd.to_datetime(result["date"], errors="coerce")
+        result["open"] = pd.to_numeric(result["open"], errors="coerce")
+        result["high"] = pd.to_numeric(result["high"], errors="coerce")
+        result["low"] = pd.to_numeric(result["low"], errors="coerce")
+        result["close"] = pd.to_numeric(result["close"], errors="coerce")
+        result["volume"] = pd.to_numeric(result["volume"], errors="coerce")
+        result["amount"] = pd.to_numeric(result["amount"], errors="coerce")
+        result = result.dropna(subset=["date"])
+        cols = ["code", "date", "open", "high", "low", "close", "volume", "amount"]
+        for c in cols:
+            if c not in result.columns:
+                result[c] = float("nan")
+        return result[cols]
 
     def get_stock_list(self) -> pd.DataFrame:
         """
@@ -211,12 +350,7 @@ class AkshareAdapter(BaseDataProvider):
 
         return df
 
-    def get_adj_factor(
-        self,
-        symbols: List[str],
-        start_date: str,
-        end_date: str
-    ) -> pd.DataFrame:
+    def get_adj_factor(self, symbols: List[str], start_date: str, end_date: str) -> pd.DataFrame:
         """
         获取复权因子
 
@@ -246,12 +380,7 @@ class AkshareAdapter(BaseDataProvider):
         except ValueError:
             return None
 
-    def get_financial(
-        self,
-        symbols: List[str],
-        report_date: str,
-        fields: List[str]
-    ) -> pd.DataFrame:
+    def get_financial(self, symbols: List[str], report_date: str, fields: List[str]) -> pd.DataFrame:
         """
         获取财务数据，返回统一标准 schema。
 
@@ -274,24 +403,38 @@ class AkshareAdapter(BaseDataProvider):
         # P0-1 PIT 契约：末尾追加 disclosure_date
         # akshare 无原生披露日接口，出口回填为 report_date（保守降级）
         standard_cols = [
-            'code', 'report_date', 'pe_ttm', 'pb', 'ps_ttm', 'dv_ratio',
-            'roe', 'roa', 'gross_margin', 'net_margin',
-            'revenue_growth', 'profit_growth',
-            'debt_ratio', 'current_ratio', 'quick_ratio', 'ocf',
-            'industry', 'name', 'disclosure_date',
+            "code",
+            "report_date",
+            "pe_ttm",
+            "pb",
+            "ps_ttm",
+            "dv_ratio",
+            "roe",
+            "roa",
+            "gross_margin",
+            "net_margin",
+            "revenue_growth",
+            "profit_growth",
+            "debt_ratio",
+            "current_ratio",
+            "quick_ratio",
+            "ocf",
+            "industry",
+            "name",
+            "disclosure_date",
         ]
 
         # 标准化报告期格式: '2024-09-30' -> '20240930'
-        period = report_date.replace('-', '')
+        period = report_date.replace("-", "")
 
         rows = []
         for code in symbols:
             ticker = self._extract_ticker(code)
-            row = {col: None for col in standard_cols}
-            row['code'] = code
-            row['report_date'] = period
+            row = dict.fromkeys(standard_cols)
+            row["code"] = code
+            row["report_date"] = period
             # P0-1 PIT 契约：akshare 无原生披露日，回填为 report_date（保守降级）
-            row['disclosure_date'] = period
+            row["disclosure_date"] = period
 
             # 1a) 优先：stock_financial_analysis_indicator（新浪，字段最全）
             try:
@@ -299,36 +442,38 @@ class AkshareAdapter(BaseDataProvider):
                 fina = ak.stock_financial_analysis_indicator(symbol=ticker, start_year=start_year)
                 if fina is not None and not fina.empty:
                     # 按报告期匹配：日期列为 '日期'，格式 'YYYY-MM-DD'
-                    fina['period_str'] = fina['日期'].astype(str).str.replace('-', '')
+                    fina["period_str"] = fina["日期"].astype(str).str.replace("-", "")
                     # 优先精确，其次取最接近且 <= period 的
-                    matched = fina[fina['period_str'] == period]
+                    matched = fina[fina["period_str"] == period]
                     if matched.empty:
-                        before = fina[fina['period_str'] <= period]
+                        before = fina[fina["period_str"] <= period]
                         matched = before.tail(1) if not before.empty else fina.tail(1)
                     if not matched.empty:
                         m = matched.iloc[0]
                         # 新浪字段映射（含 % 字符串需解析）
-                        if row.get('roe') is None:
-                            row['roe'] = self._parse_pct(m.get('净资产收益率(%)'))
-                        if row.get('roa') is None:
+                        if row.get("roe") is None:
+                            row["roe"] = self._parse_pct(m.get("净资产收益率(%)"))
+                        if row.get("roa") is None:
                             # 新浪提供 "总资产利润率(%)" 与 "总资产净利润率(%)"，取后者更接近 ROA
-                            row['roa'] = self._parse_pct(m.get('总资产净利润率(%)')) or self._parse_pct(m.get('总资产利润率(%)'))
-                        if row.get('gross_margin') is None:
-                            row['gross_margin'] = self._parse_pct(m.get('销售毛利率(%)'))
-                        if row.get('net_margin') is None:
-                            row['net_margin'] = self._parse_pct(m.get('销售净利率(%)'))
-                        if row.get('revenue_growth') is None:
-                            row['revenue_growth'] = self._parse_pct(m.get('主营业务收入增长率(%)'))
-                        if row.get('profit_growth') is None:
-                            row['profit_growth'] = self._parse_pct(m.get('净利润增长率(%)'))
-                        if row.get('debt_ratio') is None:
-                            row['debt_ratio'] = self._parse_pct(m.get('资产负债率(%)'))
-                        if row.get('current_ratio') is None:
-                            row['current_ratio'] = self._parse_pct(m.get('流动比率'))
-                        if row.get('quick_ratio') is None:
-                            row['quick_ratio'] = self._parse_pct(m.get('速动比率'))
-                        if row.get('dv_ratio') is None:
-                            row['dv_ratio'] = self._parse_pct(m.get('股息发放率(%)'))
+                            row["roa"] = self._parse_pct(m.get("总资产净利润率(%)")) or self._parse_pct(
+                                m.get("总资产利润率(%)")
+                            )
+                        if row.get("gross_margin") is None:
+                            row["gross_margin"] = self._parse_pct(m.get("销售毛利率(%)"))
+                        if row.get("net_margin") is None:
+                            row["net_margin"] = self._parse_pct(m.get("销售净利率(%)"))
+                        if row.get("revenue_growth") is None:
+                            row["revenue_growth"] = self._parse_pct(m.get("主营业务收入增长率(%)"))
+                        if row.get("profit_growth") is None:
+                            row["profit_growth"] = self._parse_pct(m.get("净利润增长率(%)"))
+                        if row.get("debt_ratio") is None:
+                            row["debt_ratio"] = self._parse_pct(m.get("资产负债率(%)"))
+                        if row.get("current_ratio") is None:
+                            row["current_ratio"] = self._parse_pct(m.get("流动比率"))
+                        if row.get("quick_ratio") is None:
+                            row["quick_ratio"] = self._parse_pct(m.get("速动比率"))
+                        if row.get("dv_ratio") is None:
+                            row["dv_ratio"] = self._parse_pct(m.get("股息发放率(%)"))
             except Exception as e:
                 self._logger.debug(f"获取 {code} 财务分析指标失败: {e}")
 
@@ -338,20 +483,20 @@ class AkshareAdapter(BaseDataProvider):
                 if fina is not None and not fina.empty:
                     # 同花顺字段映射到标准 schema
                     col_map = {
-                        '净资产收益率': 'roe',
-                        '销售毛利率': 'gross_margin',
-                        '销售净利率': 'net_margin',
-                        '营业总收入同比增长率': 'revenue_growth',
-                        '净利润同比增长率': 'profit_growth',
-                        '资产负债率': 'debt_ratio',
-                        '流动比率': 'current_ratio',
-                        '速动比率': 'quick_ratio',
-                        '每股经营现金流': 'ocf',
+                        "净资产收益率": "roe",
+                        "销售毛利率": "gross_margin",
+                        "销售净利率": "net_margin",
+                        "营业总收入同比增长率": "revenue_growth",
+                        "净利润同比增长率": "profit_growth",
+                        "资产负债率": "debt_ratio",
+                        "流动比率": "current_ratio",
+                        "速动比率": "quick_ratio",
+                        "每股经营现金流": "ocf",
                     }
                     # 寻找报告期列
                     period_col = None
                     for c in fina.columns:
-                        if '报告期' in str(c) or '日期' in str(c):
+                        if "报告期" in str(c) or "日期" in str(c):
                             period_col = c
                             break
 
@@ -361,7 +506,7 @@ class AkshareAdapter(BaseDataProvider):
                         best_row = None
                         best_period = ""
                         for _, r in fina.iterrows():
-                            rp = str(r.get(period_col, '')).replace('-', '').replace('/', '')
+                            rp = str(r.get(period_col, "")).replace("-", "").replace("/", "")
                             if rp == period:
                                 matched_row = r
                                 break
@@ -388,26 +533,26 @@ class AkshareAdapter(BaseDataProvider):
                 val_df = ak.stock_a_indicator_lg(symbol=ticker)
                 if val_df is not None and not val_df.empty:
                     # 取最接近 period 的一行（trade_date 字段）
-                    if 'trade_date' in val_df.columns:
-                        val_df['trade_date_str'] = val_df['trade_date'].astype(str).str.replace('-', '')
+                    if "trade_date" in val_df.columns:
+                        val_df["trade_date_str"] = val_df["trade_date"].astype(str).str.replace("-", "")
                         # 优先精确匹配，否则取最后一条
-                        exact = val_df[val_df['trade_date_str'] == period]
+                        exact = val_df[val_df["trade_date_str"] == period]
                         latest = exact.iloc[-1] if not exact.empty else val_df.iloc[-1]
                     else:
                         latest = val_df.iloc[-1]
 
                     for src, dst in [
-                        ('pe_ttm', 'pe_ttm'),
-                        ('pe', 'pe_ttm'),
-                        ('pb', 'pb'),
-                        ('ps_ttm', 'ps_ttm'),
-                        ('ps', 'ps_ttm'),
-                        ('dv_ratio', 'dv_ratio'),
-                        ('dv_ttm', 'dv_ratio'),
+                        ("pe_ttm", "pe_ttm"),
+                        ("pe", "pe_ttm"),
+                        ("pb", "pb"),
+                        ("ps_ttm", "ps_ttm"),
+                        ("ps", "ps_ttm"),
+                        ("dv_ratio", "dv_ratio"),
+                        ("dv_ttm", "dv_ratio"),
                     ]:
                         if src in latest.index and row.get(dst) is None:
                             try:
-                                row[dst] = pd.to_numeric(latest[src], errors='coerce')
+                                row[dst] = pd.to_numeric(latest[src], errors="coerce")
                             except Exception:
                                 pass
             except Exception as e:
@@ -420,11 +565,11 @@ class AkshareAdapter(BaseDataProvider):
                     # 行业
                     ind_row = info[info["item"].astype(str).str.contains("行业", na=False)]
                     if not ind_row.empty:
-                        row['industry'] = str(ind_row.iloc[0]["value"]).strip()
+                        row["industry"] = str(ind_row.iloc[0]["value"]).strip()
                     # 股票简称
                     name_row = info[info["item"].astype(str).str.contains("股票简称", na=False)]
                     if not name_row.empty:
-                        row['name'] = str(name_row.iloc[0]["value"]).strip()
+                        row["name"] = str(name_row.iloc[0]["value"]).strip()
             except Exception as e:
                 self._logger.debug(f"获取 {code} 个体信息失败: {e}")
 
@@ -438,7 +583,7 @@ class AkshareAdapter(BaseDataProvider):
         # 如果调用方指定了 fields，按需过滤列
         # P0-1 PIT 契约：code/report_date/disclosure_date 始终保留
         if fields:
-            keep = ['code', 'report_date', 'disclosure_date'] + [f for f in fields if f in standard_cols]
+            keep = ["code", "report_date", "disclosure_date"] + [f for f in fields if f in standard_cols]
             keep = list(dict.fromkeys(keep))  # 去重保序
             out = out[keep]
 
@@ -481,9 +626,7 @@ class AkshareAdapter(BaseDataProvider):
         """
         try:
             df = ak.stock_dzjy_mrmx(
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
-                symbol="沪深A股"
+                start_date=start_date.replace("-", ""), end_date=end_date.replace("-", ""), symbol="沪深A股"
             )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
@@ -503,9 +646,7 @@ class AkshareAdapter(BaseDataProvider):
         """
         try:
             df = ak.stock_hsgt_individual_em(
-                symbol="沪股通",
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", "")
+                symbol="沪股通", start_date=start_date.replace("-", ""), end_date=end_date.replace("-", "")
             )
             return df if df is not None else pd.DataFrame()
         except Exception as e:
@@ -553,12 +694,11 @@ class AkshareAdapter(BaseDataProvider):
             north_net_inflow
         """
         import time
-        from datetime import datetime, timedelta
         import numpy as np
 
         all_rows = []
-        start = start_date.replace("-", "")
-        end = end_date.replace("-", "")
+        start_date.replace("-", "")
+        end_date.replace("-", "")
 
         def _fetch_with_retry(func, max_retries=3, base_delay=1.0):
             """指数退避重试包装：针对 akshare 网络抖动"""
@@ -570,8 +710,8 @@ class AkshareAdapter(BaseDataProvider):
                     last_exc = e
                     # 仅对网络类错误重试
                     if "Connection" in type(e).__name__ or "RemoteDisconnected" in str(e):
-                        delay = base_delay * (2 ** attempt)
-                        self._logger.debug(f"重试 {attempt+1}/{max_retries} (延迟 {delay}s): {e}")
+                        delay = base_delay * (2**attempt)
+                        self._logger.debug(f"重试 {attempt + 1}/{max_retries} (延迟 {delay}s): {e}")
                         time.sleep(delay)
                         continue
                     # 非网络错误直接抛出
@@ -583,20 +723,21 @@ class AkshareAdapter(BaseDataProvider):
             market = "sh" if code.startswith("6") else "sz"
             try:
                 # 主力资金流向（带重试）
-                df = _fetch_with_retry(
-                    lambda: ak.stock_individual_fund_flow(stock=ticker, market=market)
-                )
+                df = _fetch_with_retry(lambda: ak.stock_individual_fund_flow(stock=ticker, market=market))
                 if df is not None and not df.empty:
-                    df = df.rename(columns={
-                        "日期": "date", "收盘价": "close",
-                        "涨跌幅": "change_pct",
-                        "主力净流入-净额": "main_net_inflow",
-                        "主力净流入-净占比": "main_net_ratio",
-                        "超大单净流入-净额": "super_large_net",
-                        "大单净流入-净额": "large_net",
-                        "中单净流入-净额": "medium_net",
-                        "小单净流入-净额": "small_net",
-                    })
+                    df = df.rename(
+                        columns={
+                            "日期": "date",
+                            "收盘价": "close",
+                            "涨跌幅": "change_pct",
+                            "主力净流入-净额": "main_net_inflow",
+                            "主力净流入-净占比": "main_net_ratio",
+                            "超大单净流入-净额": "super_large_net",
+                            "大单净流入-净额": "large_net",
+                            "中单净流入-净额": "medium_net",
+                            "小单净流入-净额": "small_net",
+                        }
+                    )
                     if "date" in df.columns:
                         df["date"] = pd.to_datetime(df["date"]).dt.strftime("%Y-%m-%d")
                     df["code"] = code
@@ -616,11 +757,16 @@ class AkshareAdapter(BaseDataProvider):
         # 计算5日主力净流入均值
         result = result.sort_values(["code", "date"])
         if "main_net_inflow" in result.columns:
-            result["main_net_inflow_5d"] = result.groupby("code")["main_net_inflow"].rolling(5, min_periods=1).mean().reset_index(level=0, drop=True)
+            result["main_net_inflow_5d"] = (
+                result.groupby("code")["main_net_inflow"]
+                .rolling(5, min_periods=1)
+                .mean()
+                .reset_index(level=0, drop=True)
+            )
 
         # 北向资金（个股层面，可选字段）
         try:
-            for board in ["沪股通", "深股通"]:
+            for _board in ["沪股通", "深股通"]:
                 north_df = self.get_north_flow(start_date, end_date)
                 if north_df is not None and not north_df.empty:
                     # 合并到 result（简化处理，北向资金为可选字段）
@@ -629,8 +775,15 @@ class AkshareAdapter(BaseDataProvider):
             self._logger.warning(f"获取北向资金失败: {e}")
 
         # 确保标准列存在
-        for col in ["main_net_inflow", "main_net_inflow_5d", "super_large_net",
-                     "large_net", "medium_net", "small_net", "north_net_inflow"]:
+        for col in [
+            "main_net_inflow",
+            "main_net_inflow_5d",
+            "super_large_net",
+            "large_net",
+            "medium_net",
+            "small_net",
+            "north_net_inflow",
+        ]:
             if col not in result.columns:
                 result[col] = np.nan
 
@@ -652,7 +805,6 @@ class AkshareAdapter(BaseDataProvider):
         返回 DataFrame 标准字段:
             code, trade_date, has_data, reason, net_buy, seats
         """
-        import numpy as np
 
         start = start_date.replace("-", "")
         end = end_date.replace("-", "")
@@ -691,23 +843,27 @@ class AkshareAdapter(BaseDataProvider):
                         net_buy_val = float(row.get(net_buy_col))
                     except (ValueError, TypeError):
                         net_buy_val = 0.0
-                all_rows.append({
-                    "code": code,
-                    "trade_date": trade_date_val,
-                    "has_data": True,
-                    "reason": str(row.get(reason_col, "")) if reason_col else "",
-                    "net_buy": net_buy_val,
-                    "seats": "",
-                })
+                all_rows.append(
+                    {
+                        "code": code,
+                        "trade_date": trade_date_val,
+                        "has_data": True,
+                        "reason": str(row.get(reason_col, "")) if reason_col else "",
+                        "net_buy": net_buy_val,
+                        "seats": "",
+                    }
+                )
             else:
-                all_rows.append({
-                    "code": code,
-                    "trade_date": "",
-                    "has_data": False,
-                    "reason": "",
-                    "net_buy": 0.0,
-                    "seats": "",
-                })
+                all_rows.append(
+                    {
+                        "code": code,
+                        "trade_date": "",
+                        "has_data": False,
+                        "reason": "",
+                        "net_buy": 0.0,
+                        "seats": "",
+                    }
+                )
 
         return pd.DataFrame(all_rows)
 
@@ -732,7 +888,6 @@ class AkshareAdapter(BaseDataProvider):
         返回 DataFrame 标准字段:
             code, holder_name, hold_amount, hold_ratio, change_type, holder_type
         """
-        import numpy as np
 
         # 标准化报告期格式: '2024-09-30' -> '20240930'
         period = report_date.replace("-", "") if report_date else ""
@@ -758,6 +913,7 @@ class AkshareAdapter(BaseDataProvider):
                 else:
                     # 回退查找最近 4 个季度
                     from datetime import datetime
+
                     today = datetime.now()
                     quarters = []
                     y, m = today.year, today.month
@@ -783,13 +939,15 @@ class AkshareAdapter(BaseDataProvider):
                         continue
 
                 if df is not None and not df.empty:
-                    df = df.rename(columns={
-                        "股东名称": "holder_name",
-                        "持股数": "hold_amount",
-                        "占总流通股本持股比例": "hold_ratio",
-                        "增减": "change_type",
-                        "变动比率": "change_ratio",
-                    })
+                    df = df.rename(
+                        columns={
+                            "股东名称": "holder_name",
+                            "持股数": "hold_amount",
+                            "占总流通股本持股比例": "hold_ratio",
+                            "增减": "change_type",
+                            "变动比率": "change_ratio",
+                        }
+                    )
                     df["code"] = code
                     df["holder_type"] = "流通股东"
                     all_rows.append(df)
@@ -801,8 +959,7 @@ class AkshareAdapter(BaseDataProvider):
 
         result = pd.concat(all_rows, ignore_index=True)
         # 确保标准列存在
-        for col in ["code", "holder_name", "hold_amount", "hold_ratio",
-                     "change_type", "holder_type"]:
+        for col in ["code", "holder_name", "hold_amount", "hold_ratio", "change_type", "holder_type"]:
             if col not in result.columns:
                 result[col] = None
 
