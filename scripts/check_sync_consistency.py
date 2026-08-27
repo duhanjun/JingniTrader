@@ -126,7 +126,9 @@ def check_git_dirty() -> Dict[str, Any]:
     if rc != 0:
         return {"id": "git-dirty", "ok": False, "level": "ERROR",
                 "detail": "git status 执行失败: %s" % out}
-    dirty = [l[3:] for l in out.splitlines() if l.strip()]
+    # porcelain 格式为 "<XY> <path>"：状态占前 2 列，第 3 列是空格，路径从第 4 列起。
+    # 用 l[3:] 会切掉路径首字符（如 README.md → EADME.md），必须按状态长度切分。
+    dirty = [l[3:] if l[2:3] == " " else l[2:] for l in out.splitlines() if l.strip()]
     real = [p for p in dirty if not _is_artifact(p)]
     return {
         "id": "git-dirty",
