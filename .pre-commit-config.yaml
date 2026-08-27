@@ -34,6 +34,16 @@ repos:
             references/.*
           )$
 
+      - id: sync-consistency
+        name: 三方一致性校验（主目录 ↔ 仓库副本 ↔ GitHub）
+        entry: python scripts/check_sync_consistency.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        # 说明：拦截「版本库混入运行时产物」与「副本受保护资产被反向覆盖丢失」，
+        # 这两类是 ERROR 级会阻断提交；未提交改动/领先远端为 WARN 不阻断。
+        # 内容漂移比对（--deep）较慢，留给 CI，不放在提交路径上。
+
       - id: key-test-subset
         name: 关键契约测试子集（本地门禁，不跑重型计算）
         entry: python -m pytest tests/master/test_schemas.py tests/master/test_fsm.py tests/portfolio_risk_engine/test_estimate_covariance_fallback.py -p no:cacheprovider -q
