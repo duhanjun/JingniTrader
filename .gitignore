@@ -45,6 +45,10 @@ skills/jingni-datafeed/
 # docs 为本地设计/需求文档目录（非运行代码，不纳入版本库）
 docs/
 
+# docs 内禁止复现的三方调研压缩包（体积大且为第三方源码快照，不可入库）
+docs/**/*.zip
+*.zip
+
 
 # 一次性调试/探针脚本（含明文凭证，禁止纳入版本库）
 _gm*.py
@@ -59,3 +63,7 @@ _live_xtquant_ws/
 _reports_e2e/
 _e2e_workdir/
 _repro_*.py
+
+# 崩溃转储与 mlflow 运行产物（原生 SDK 段错误/实验日志，不入库）
+*.dmp
+mlruns/

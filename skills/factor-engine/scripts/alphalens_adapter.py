@@ -13,21 +13,32 @@ Alphalens 数据格式适配器与报告生成
 - 每个因子输出 4 PNG + 1 HTML + 1 JSON（8 必填字段）
 - 若 alphalens-reloaded 不可用，自动降级到方案 C（自研轻量分层回测）
 
-PRD：docs/prd_factor_alphalens_integration.md
+PRD：docs/01-archive/prd/factor-alphalens-integration.md（历史归档，实现口径以本文件与 config_guide.md 为准）
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import pandas as pd
 
 logger = logging.getLogger("alphalens_adapter")
+
+# Windows 多进程 spawn 兼容：spawn 子进程重建解释器时不继承父进程动态注入的
+# sys.path，导致子进程反序列化 worker（来自 scripts.alphalens_adapter 模块）时
+# 抛 ModuleNotFoundError: No module named 'scripts.alphalens_adapter'。
+# 模块顶层即把本脚本所在目录（scripts 包的父目录）注入 sys.path，使无论是主进程
+# 还是 spawn 子进程 import scripts.* 均可成功。
+_FACTOR_ENGINE_DIR = os.path.dirname(os.path.abspath(__file__))
+if _FACTOR_ENGINE_DIR not in sys.path:
+    sys.path.insert(0, _FACTOR_ENGINE_DIR)
 
 # 单因子完整报告（alphalens 原生 tear sheet 计算）的超时护栏（秒）。
 # alphalens-reloaded 在极端/合成数据上可能长时间不收敛甚至挂起，
@@ -35,27 +46,55 @@ logger = logging.getLogger("alphalens_adapter")
 ALPHALENS_FULL_REPORT_TIMEOUT = float(os.environ.get("ALPHALENS_REPORT_TIMEOUT", "60"))
 
 
-def _run_full_report_worker(factor_data, output_dir, factor_name, result_q):
-    """子进程 worker：执行完整 alphalens 报告生成，结果通过 Queue 回传。"""
-    try:
-        paths = AlphalensAdapter.generate_full_report(factor_data, output_dir, factor_name)
-        result_q.put(("ok", paths))
-    except Exception as e:  # pragma: no cover - 子进程异常兜底
-        result_q.put(("err", repr(e)))
+def _mp_init_path():
+    """spawn 子进程 initializer：将 factor-engine 目录注入 sys.path。
+
+    Windows 多进程 spawn 重建解释器时不继承父进程动态注入的 sys.path，子进程反序列化
+    worker（来自 scripts.alphalens_adapter）时抛 ModuleNotFoundError。initializer 在子进程
+    启动早期注入 path，确保 import scripts.* 成功。
+    """
+    if _FACTOR_ENGINE_DIR not in sys.path:
+        sys.path.insert(0, _FACTOR_ENGINE_DIR)
 
 
-def _generate_full_report_with_timeout(factor_data, output_dir, factor_name):
-    """带超时的完整 alphalens 报告生成。
+def _alphalens_full_worker(factor_df, price_df, output_dir, factor_name):
+    """子进程 worker：执行 alphalens 数据格式转换 + 完整报告生成。
 
-    返回 generate_full_report 的路径字典；超时或失败时返回 None（调用方降级方案 C）。
+    结果通过文件落地（metrics.json / report.html），主进程超时后读文件判定，
+    避免 Windows 下 multiprocessing.Queue/Pipe 在子进程被 kill 后的死锁挂起。
+    """
+    factor_data = AlphalensAdapter.to_alphalens_format(factor_df, price_df, factor_name)
+    return AlphalensAdapter.generate_full_report(factor_data, output_dir, factor_name)
+
+
+def _run_alphalens_full_with_timeout(factor_df, price_df, output_dir, factor_name):
+    """带超时的 alphalens 原生全链路（格式转换 + 报告生成）。
+
+    使用 spawn 子进程（initializer 注入 path），超时（ALPHALENS_FULL_REPORT_TIMEOUT）
+    后 terminate 子进程并降级方案 C。结果判定基于子进程落地的 metrics.json 文件是否存在，
+    而非 Queue 回收，彻底避免 Windows 下 Queue 死锁导致主进程挂起。
+    返回路径字典；超时或失败时返回 None（调用方降级方案 C）。
     """
     import multiprocessing as mp
 
+    # Windows spawn 子进程继承 PYTHONPATH 但不继承父进程运行期动态插入的 sys.path；
+    # 双保险：显式把 factor-engine 目录写入 PYTHONPATH（initializer 之外再覆盖一层）。
+    _pypath = os.environ.get("PYTHONPATH", "")
+    if _FACTOR_ENGINE_DIR not in _pypath.split(os.pathsep):
+        os.environ["PYTHONPATH"] = _FACTOR_ENGINE_DIR + os.pathsep + _pypath
+
+    metrics_path = os.path.join(output_dir, f"{factor_name}_metrics.json")
+    # 预删旧 metrics，避免超时后误判历史成功文件
+    if os.path.exists(metrics_path):
+        try:
+            os.remove(metrics_path)
+        except OSError:
+            pass
+
     ctx = mp.get_context("spawn")
-    result_q = ctx.Queue()
     proc = ctx.Process(
-        target=_run_full_report_worker,
-        args=(factor_data, output_dir, factor_name, result_q),
+        target=_alphalens_full_worker,
+        args=(factor_df, price_df, output_dir, factor_name),
         daemon=True,
     )
     proc.start()
@@ -63,17 +102,18 @@ def _generate_full_report_with_timeout(factor_data, output_dir, factor_name):
     if proc.is_alive():
         proc.kill()
         logger.warning(
-            "alphalens 完整报告生成超时（>%ss，因子 %s），降级方案 C",
-            ALPHALENS_FULL_REPORT_TIMEOUT, factor_name,
+            "alphalens 原生全链路超时（>%ss，因子 %s），降级方案 C",
+            ALPHALENS_FULL_REPORT_TIMEOUT,
+            factor_name,
         )
         return None
-    if not result_q.empty():
-        status, payload = result_q.get()
-        if status == "ok":
-            return payload
-        logger.warning("alphalens 完整报告生成失败，降级方案 C: %s", payload)
-        return None
-    logger.warning("alphalens 完整报告生成无返回，降级方案 C（因子 %s）", factor_name)
+    # 子进程正常结束：依据 metrics.json 是否落地判定成功（不依赖 Queue/Pipe）
+    if os.path.exists(metrics_path):
+        return {
+            "metrics_json": metrics_path,
+            "html": os.path.join(output_dir, f"{factor_name}_report.html"),
+        }
+    logger.warning("alphalens 原生全链路未产出 metrics，降级方案 C（因子 %s）", factor_name)
     return None
 
 
@@ -91,6 +131,7 @@ def _alphalens_available() -> bool:
     """检查 alphalens-reloaded 是否可用"""
     try:
         import alphalens  # noqa: F401
+
         return True
     except ImportError:
         return False
@@ -198,6 +239,7 @@ class AlphalensAdapter:
          "summary_png": ..., "html": ..., "metrics_json": ...}
         """
         import matplotlib
+
         matplotlib.use("Agg")  # 无头模式，避免 Windows 显示问题
         import matplotlib.pyplot as plt
         import alphalens as al
@@ -324,10 +366,7 @@ class AlphalensAdapter:
                 long_short_return = float(ls_series.mean())
                 ls_std = float(ls_series.std())
                 # 使用容差避免浮点精度导致 std 为极小非零值时除以趋近于 0 的数
-                long_short_sharpe = (
-                    float(long_short_return / ls_std * np.sqrt(252))
-                    if ls_std > 1e-10 else 0.0
-                )
+                long_short_sharpe = float(long_short_return / ls_std * np.sqrt(252)) if ls_std > 1e-10 else 0.0
 
         # IC：取所有周期平均
         ic_mean = 0.0
@@ -339,9 +378,7 @@ class AlphalensAdapter:
             ic_ir = float(ic_mean / ic_std) if ic_std > 1e-10 else 0.0
 
         # 建议结论（参考 RuleJudge 阈值：IC_IR ≥ 0.5, Sharpe ≥ 0.8）
-        suggested_verdict = (
-            "ACCEPT" if (ic_ir >= 0.5 and long_short_sharpe >= 0.8) else "REVIEW"
-        )
+        suggested_verdict = "ACCEPT" if (ic_ir >= 0.5 and long_short_sharpe >= 0.8) else "REVIEW"
 
         return {
             "factor": factor_name,
@@ -399,14 +436,14 @@ class AlphalensAdapter:
 
 <h2>关键指标</h2>
 <div class="metrics-grid">
-  <div class="metric-card"><div class="metric-name">Top 分层收益</div><div class="metric-value">{metrics['top_quantile_return']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">Bottom 分层收益</div><div class="metric-value">{metrics['bottom_quantile_return']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">多空收益</div><div class="metric-value">{metrics['long_short_return']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">多空夏普</div><div class="metric-value">{metrics['long_short_sharpe']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">IC 均值</div><div class="metric-value">{metrics['ic_mean']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">IC IR</div><div class="metric-value">{metrics['ic_ir']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">Top 分层换手率</div><div class="metric-value">{metrics['avg_turnover_top_quantile']:.4f}</div></div>
-  <div class="metric-card"><div class="metric-name">建议结论</div><div class="metric-value"><span class="verdict">{metrics['suggested_verdict']}</span></div></div>
+  <div class="metric-card"><div class="metric-name">Top 分层收益</div><div class="metric-value">{metrics["top_quantile_return"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">Bottom 分层收益</div><div class="metric-value">{metrics["bottom_quantile_return"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">多空收益</div><div class="metric-value">{metrics["long_short_return"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">多空夏普</div><div class="metric-value">{metrics["long_short_sharpe"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">IC 均值</div><div class="metric-value">{metrics["ic_mean"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">IC IR</div><div class="metric-value">{metrics["ic_ir"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">Top 分层换手率</div><div class="metric-value">{metrics["avg_turnover_top_quantile"]:.4f}</div></div>
+  <div class="metric-card"><div class="metric-name">建议结论</div><div class="metric-value"><span class="verdict">{metrics["suggested_verdict"]}</span></div></div>
 </div>
 
 <h2>分层净值与累积收益</h2>
@@ -440,7 +477,7 @@ class AlphalensAdapter:
         output_dir: Path,
         forward_periods: Tuple[int, ...] = (1, 5, 20),
         quantiles: int = 5,
-    ) -> Optional[Dict[str, str]]:
+    ) -> Dict[str, str] | None:
         """端到端：单因子报告生成（含 fallback 到方案 C）。
 
         返回
@@ -450,29 +487,37 @@ class AlphalensAdapter:
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # 路径 A：alphalens-reloaded 可用
-        if _alphalens_available():
+        # 路径 A：alphalens-reloaded 原生路径
+        # Windows 护栏：alphalens-reloaded 的 get_clean_factor_and_forward_returns
+        # 在真实行情数据上会长时间不收敛甚至挂起（与超时机制无关，spawn 子进程被
+        # kill 后主进程仍可能卡在回收），导致 FACTOR 阶段在 Windows 下卡死。
+        # 因此 Windows 默认跳过原生路径，直接走方案 C（纯 pandas 分层回测，绝不挂起）；
+        # 仅当用户显式设置 QUANT_ALPHALENS_NATIVE=1 且平台非 win32 时才走原生路径。
+        _native_allowed = sys.platform != "win32" and os.environ.get("QUANT_ALPHALENS_NATIVE", "0") == "1"
+        if _alphalens_available() and _native_allowed:
             try:
-                factor_data = AlphalensAdapter.to_alphalens_format(
-                    factor_df, price_df, factor_name,
-                    forward_periods=forward_periods,
-                    quantiles=quantiles,
-                )
-                # 带超时护栏：alphalens 原生计算可能挂起，超时即降级方案 C
-                paths = _generate_full_report_with_timeout(
-                    factor_data, output_dir, factor_name
-                )
+                # 带超时护栏：to_alphalens_format + generate_full_report 一并放入 spawn
+                # 子进程（后者 60s 超时），alphalens-reloaded 对真实数据可能挂起/长算，
+                # 超时即降级方案 C，避免 FACTOR 阶段卡死。
+                paths = _run_alphalens_full_with_timeout(factor_df, price_df, output_dir, factor_name)
                 if paths is not None:
                     return paths
             except Exception as e:
-                logger.warning(
-                    f"alphalens 路径失败，降级到方案 C（因子 {factor_name}）: {e}"
-                )
+                logger.warning(f"alphalens 路径失败，降级到方案 C（因子 {factor_name}）: {e}")
+        elif _alphalens_available() and not _native_allowed:
+            logger.info(
+                "Windows 平台或 QUANT_ALPHALENS_NATIVE 未开启，跳过 alphalens 原生路径，直接走方案 C（因子 %s）",
+                factor_name,
+            )
 
         # 路径 C：自研轻量分层回测（不生成 PNG，仅 JSON）
         return _fallback_layered_backtest(
-            factor_df, price_df, factor_name, output_dir,
-            forward_periods=forward_periods, quantiles=quantiles,
+            factor_df,
+            price_df,
+            factor_name,
+            output_dir,
+            forward_periods=forward_periods,
+            quantiles=quantiles,
         )
 
 
@@ -497,7 +542,7 @@ def _fallback_layered_backtest(
     output_dir: Path,
     forward_periods: Tuple[int, ...] = (1, 5, 20),
     quantiles: int = 5,
-) -> Optional[Dict[str, str]]:
+) -> Dict[str, str] | None:
     """方案 C：自研轻量分层回测，仅输出 metrics.json + 简单 HTML。
 
     触发条件：
@@ -510,9 +555,11 @@ def _fallback_layered_backtest(
         prefix = factor_name
 
         # 1. 合并因子与价格，按 date 截面分层
-        merged = factor_df[["date", "code", factor_name]].merge(
-            price_df[["date", "code", "close"]], on=["date", "code"], how="inner"
-        ).dropna(subset=[factor_name, "close"])
+        merged = (
+            factor_df[["date", "code", factor_name]]
+            .merge(price_df[["date", "code", "close"]], on=["date", "code"], how="inner")
+            .dropna(subset=[factor_name, "close"])
+        )
 
         if merged.empty:
             logger.warning(f"方案 C: 因子 {factor_name} 合并后为空")
@@ -521,16 +568,12 @@ def _fallback_layered_backtest(
         # 2. 计算前瞻收益
         merged = merged.sort_values(["code", "date"])
         for p in forward_periods:
-            merged[f"fwd_{p}d"] = (
-                merged.groupby("code")["close"].shift(-p) / merged["close"] - 1
-            )
+            merged[f"fwd_{p}d"] = merged.groupby("code")["close"].shift(-p) / merged["close"] - 1
 
         # 3. 按截面因子值分层（quantile 1=最低，quantile=最高）
         def _quantile_assign(group):
             try:
-                return pd.qcut(
-                    group[factor_name], q=quantiles, labels=False, duplicates="drop"
-                )
+                return pd.qcut(group[factor_name], q=quantiles, labels=False, duplicates="drop")
             except Exception:
                 return pd.Series([np.nan] * len(group), index=group.index)
 
@@ -542,11 +585,7 @@ def _fallback_layered_backtest(
             logger.warning(f"方案 C: 缺少前瞻期列 {period_col}")
             return None
 
-        quantile_returns = (
-            merged.dropna(subset=["quantile", period_col])
-            .groupby("quantile")[period_col]
-            .mean()
-        )
+        quantile_returns = merged.dropna(subset=["quantile", period_col]).groupby("quantile")[period_col].mean()
 
         if quantile_returns.empty:
             return None
@@ -569,10 +608,7 @@ def _fallback_layered_backtest(
             .dropna()
         )
         ls_std = float(ls_series.std()) if len(ls_series) > 1 else 0.0
-        long_short_sharpe = (
-            float(long_short_return / ls_std * np.sqrt(252))
-            if ls_std > 1e-10 else 0.0
-        )
+        long_short_sharpe = float(long_short_return / ls_std * np.sqrt(252)) if ls_std > 1e-10 else 0.0
 
         # 6. IC（因子值 vs 前瞻收益的 Spearman 相关）
         ic_series = (
@@ -594,7 +630,7 @@ def _fallback_layered_backtest(
         )
         turnover_list = []
         prev_set = None
-        for d, members in top_members.items():
+        for _d, members in top_members.items():
             if prev_set is not None and (len(prev_set) + len(members)) > 0:
                 union = prev_set | members
                 inter = prev_set & members
@@ -603,9 +639,7 @@ def _fallback_layered_backtest(
         avg_turnover_top = float(np.mean(turnover_list)) if turnover_list else 0.0
 
         # 8. 建议结论
-        suggested_verdict = (
-            "ACCEPT" if (ic_ir >= 0.5 and long_short_sharpe >= 0.8) else "REVIEW"
-        )
+        suggested_verdict = "ACCEPT" if (ic_ir >= 0.5 and long_short_sharpe >= 0.8) else "REVIEW"
 
         metrics = {
             "factor": factor_name,
@@ -622,15 +656,11 @@ def _fallback_layered_backtest(
 
         # 写 JSON
         metrics_path = output_dir / f"{prefix}_metrics.json"
-        metrics_path.write_text(
-            json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
+        metrics_path.write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
 
         # 写简化 HTML（无 PNG）
         html_path = output_dir / f"{prefix}_report.html"
-        html_path.write_text(
-            _fallback_html(factor_name, metrics), encoding="utf-8"
-        )
+        html_path.write_text(_fallback_html(factor_name, metrics), encoding="utf-8")
 
         logger.info(f"方案 C 报告已生成（无 PNG）: {metrics_path}")
         return {
@@ -688,8 +718,8 @@ def _fallback_html(factor_name: str, metrics: Dict[str, Any]) -> str:
 <div class="notice">⚠️ alphalens-reloaded 不可用，已降级到自研轻量分层回测（仅 JSON 指标，无图）。</div>
 <h2>关键指标</h2>
 <div class="metrics-grid">
-  {''.join(cards)}
-  <div class="metric-card"><div class="metric-name">建议结论</div><div class="metric-value"><span class="verdict">{metrics['suggested_verdict']}</span></div></div>
+  {"".join(cards)}
+  <div class="metric-card"><div class="metric-name">建议结论</div><div class="metric-value"><span class="verdict">{metrics["suggested_verdict"]}</span></div></div>
 </div>
 <footer>由 jingni-trader factor-engine 自研轻量分层回测生成</footer>
 </body>

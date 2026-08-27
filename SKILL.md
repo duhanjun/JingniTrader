@@ -1,104 +1,122 @@
 ---
 name: jingni-trader
-version: 1.0.0
-description: A股量化交易全流程主调度器。负责解析用户意图，管理投研阶段状态机，维护跨 Skill 的上下文对象，按流程依次调度七个子 Skill 完成从数据采集到绩效报告的全链路工作。本身不执行任何量化计算，只做编排。
-author: quant-team
+description: A股量化交易全流程主调度器。用于解析用户投研意图、管理投研阶段状态机、维护跨 Skill 上下文，按流程依次调度七个子 Skill 完成从数据采集、因子计算、策略建模、回测、组合优化到绩效报告的全链路分析工作；本身不执行任何量化计算，只做编排。触发关键词：量化、回测、选股、因子、实盘、组合优化、A股、策略开发、分析、技术面、基本面、诊股。首次使用请先运行 skill 根目录 install.py 安装依赖（默认国内加速镜像）。
 license: MIT
-tags:
-  - quant-trading
-  - A股
-  - master-skill
-  - workflow
-  - 量化
-  - 调度器
-dependencies:
-  - importlib (Python 标准库)
-  - logging (Python 标准库)
-  - json (Python 标准库)
-environment_variables:
-  - name: TUSHARE_TOKEN
-    description: Tushare Pro API Token（启用 tushare 数据源时需要；tushare 是 opt-in 源，默认不参与降级链）
-    required: false
-  - name: GM_TOKEN
-    description: 掘金量化API Token，用于实盘交易
-    required: false
-  - name: IFIND_USERNAME
-    description: 同花顺 iFinD 登录账号（启用 ifind 数据源时需要）
-    required: false
-  - name: IFIND_PASSWORD
-    description: 同花顺 iFinD 登录密码（启用 ifind 数据源时需要）
-    required: false
-  - name: JINGNI_URL
-    description: 惊泥因子库服务地址（启用 jingni-datafeed 因子库时需要）
-    required: false
-  - name: JINGNI_TOKEN
-    description: 惊泥因子库 API Token（启用 jingni-datafeed 因子库时需要）
-    required: false
-  - name: DATA_BACKENDS
-    description: 数据源优先级链，逗号分隔（如 "tushare,baostock,akshare,websearch"）。默认 "baostock,akshare,websearch"（仅真正免费源）。用户对话指定时优先级高于此变量
-    required: false
-    default: "baostock,akshare,websearch"
-  - name: QUANT_WORK_DIR
-    description: 数据和工作目录
-    required: false
-    default: "./workspace"
-  - name: QUANT_FORCE_REFRESH
-    description: 强制刷新所有阶段，忽略缓存产物（设为 "1" 启用）
-    required: false
-    default: "0"
-  - name: FACTOR_BACKEND
-    description: 因子计算后端（pandas_ta / talib），默认 pandas_ta（纯 Python，无需安装 C 依赖）
-    required: false
-    default: "pandas_ta"
-  - name: BACKTEST_BACKEND
-    description: 回测引擎后端（native / rqalpha / backtrader / gm），默认 native
-    required: false
-    default: "native"
-  - name: ALLOW_SYNTHETIC_FALLBACK
-    description: 全部数据源失败时是否生成模拟数据兜底（默认 true）
-    required: false
-    default: "true"
-  - name: AUTO_INSTALL_BACKENDS
-    description: 数据源依赖缺失时自动 pip install 后重试（默认 true）
-    required: false
-    default: "true"
-  - name: LOG_LEVEL
-    description: 日志级别
-    required: false
-    default: "INFO"
-language: python
-python_version: "3.9+"
-entry_point: engine.py
-allowed_sub_skills:
-  - data-engine
-  - factor-engine
-  - strategy-model-engine
-  - backtest-engine
-  - portfolio-risk-engine
-  - execution-monitor-engine
-  - reports-engine
-included_skills:
-  - skills/data-engine
-  - skills/factor-engine
-  - skills/strategy-model-engine
-  - skills/backtest-engine
-  - skills/portfolio-risk-engine
-  - skills/execution-monitor-engine
-  - skills/reports-engine
-  - skills/jingni-datafeed
-trigger_keywords:
-  - 量化
-  - 回测
-  - 选股
-  - 因子
-  - 实盘
-  - 组合优化
-  - A股
-  - 策略开发
-  - 分析
-  - 技术面
-  - 基本面
-  - 诊股
+compatibility: 需 Python 3.9+；入口 engine.py。数据源按需配置 TUSHARE_TOKEN / IFIND_USERNAME / IFIND_PASSWORD / JINGNI_URL / JINGNI_TOKEN / GM_TOKEN 等环境变量，默认降级链 local,westock,baostock,akshare,websearch 仅用免费源；需网络访问行情数据源。
+metadata:
+  jingni:
+    version: "1.1.0"
+    category: 技术
+    author: quant-team
+    created: "2026-08-14"
+    updated: "2026-08-27"
+    label: 惊泥量化交易主调度器
+    maturity: beta
+    description_for_human: A股量化投研全流程编排器，串联七个子引擎完成数据到报告的闭环。
+    when_not_to_use: 不适用于单纯的行情查询或个股基础信息检索（应直接用数据源 skill）；不适用于非 A 股市场；不建议用于真实下单交易——本 skill 具备 live 实盘下单代码能力，但 live 链路无本引擎侧硬风控断路器，详见「交易模式与合规口径」。
+    tags:
+      - quant-trading
+      - A股
+      - master-skill
+      - workflow
+      - 量化
+      - 调度器
+    permissions:
+      external: true
+    compliance:
+      basis: 内部量化研究规范；仅模拟回测与研究分析，不构成投资建议。默认 paper 模式不触碰真实资金，不执行真实委托下单。
+      prohibited_self_check: 未触及禁止类；不提供代客理财、不承诺收益。实盘（live）为特别监管类：需使用者本人显式配置并自担风险，当前 live 链路无本引擎侧硬风控断路器，见「交易模式与合规口径」。
+      data_source_trust: 第三方行情数据源（tushare/baostock/akshare/ifind 等），来源可信度依供应商授权口径，回测结论仅供研究参考。
+    privacy: 本 skill 不采集个人身份信息；密钥一律经环境变量注入，不落盘明文。
+    runtime:
+      language: python
+      python_version: "3.9+"
+      entry_point: engine.py
+      environment_variables:
+        - name: TUSHARE_TOKEN
+          description: Tushare Pro API Token（启用 tushare 数据源时需要；tushare 是 opt-in 源，默认不参与降级链）
+          required: false
+        - name: GM_TOKEN
+          description: 掘金量化API Token，用于实盘交易
+          required: false
+        - name: IFIND_USERNAME
+          description: 同花顺 iFinD 登录账号（启用 ifind 数据源时需要）
+          required: false
+        - name: IFIND_PASSWORD
+          description: 同花顺 iFinD 登录密码（启用 ifind 数据源时需要）
+          required: false
+        - name: JINGNI_URL
+          description: 惊泥因子库服务地址（启用 jingni-datafeed 因子库时需要）
+          required: false
+        - name: JINGNI_TOKEN
+          description: 惊泥因子库 API Token（启用 jingni-datafeed 因子库时需要）
+          required: false
+        - name: DATA_BACKENDS
+          description: 数据源优先级链，逗号分隔（如 "tushare,baostock,akshare,websearch"）。默认 "local,westock,baostock,akshare,websearch"（5 源免费链，local 为本地 Parquet 缓存且优先级最高）。用户对话指定时优先级高于此变量
+          required: false
+          default: "local,westock,baostock,akshare,websearch"
+        - name: QUANT_WORK_DIR
+          description: 数据和工作目录
+          required: false
+          default: "./workspace"
+        - name: QUANT_FORCE_REFRESH
+          description: 强制刷新所有阶段，忽略缓存产物（设为 "1" 启用）
+          required: false
+          default: "0"
+        - name: FACTOR_BACKEND
+          description: 因子计算后端（pandas_ta / talib），默认 pandas_ta（纯 Python，无需安装 C 依赖）
+          required: false
+          default: "pandas_ta"
+        - name: BACKTEST_BACKEND
+          description: 回测引擎后端（native / rqalpha / backtrader / gm），默认 native
+          required: false
+          default: "native"
+        - name: ALLOW_SYNTHETIC_FALLBACK
+          description: 全部数据源失败时是否生成模拟数据兜底（默认 false：显式报错、绝不静默合成行情；置 true 才生成模拟数据并告知用户）
+          required: false
+          default: "false"
+        - name: AUTO_INSTALL_BACKENDS
+          description: 数据源依赖缺失时自动 pip install 后重试（默认 false，遵循私有化纪律；置 true 时启用，且自动安装默认走清华 TUNA 加速镜像，可用 PIP_INDEX_URL 覆盖）
+          required: false
+          default: "false"
+        - name: LOG_LEVEL
+          description: 日志级别
+          required: false
+          default: "INFO"
+      python_dependencies:
+        - importlib (Python 标准库)
+        - logging (Python 标准库)
+        - json (Python 标准库)
+      allowed_sub_skills:
+        - data-engine
+        - factor-engine
+        - strategy-model-engine
+        - backtest-engine
+        - portfolio-risk-engine
+        - execution-monitor-engine
+        - reports-engine
+      included_skills:
+        - skills/data-engine
+        - skills/factor-engine
+        - skills/strategy-model-engine
+        - skills/backtest-engine
+        - skills/portfolio-risk-engine
+        - skills/execution-monitor-engine
+        - skills/reports-engine
+        - skills/jingni-datafeed
+      trigger_keywords:
+        - 量化
+        - 回测
+        - 选股
+        - 因子
+        - 实盘
+        - 组合优化
+        - A股
+        - 策略开发
+        - 分析
+        - 技术面
+        - 基本面
+        - 诊股
 ---
 
 # jingni-trader
@@ -140,10 +158,7 @@ agent 运行本 skill 时，根据下表匹配用户意图 → 调度对应引�
 - `ctx.metadata["report_template"]`: 报告模板检测（technical/fundamental/both），**正交维度**，两条路径都设置
 - `reports-engine` 已统一路由：根据是否存在 `BACKTEST` 产物自动选择生成绩效报告还是模板分析报告，无需上层区分
 
-个股分析报告支持三种模板：
-- **technical**: 仅生成技术面深度分析报告（含A股特色：资金面、龙虎榜）
-- **fundamental**: 仅生成基本面深度分析报告（含A股特色：股东结构）
-- **both**: 同时生成技术面与基本面两份报告（默认）
+个股分析报告支持三种模板：**technical**（技术面深度分析，含A股特色：资金面、龙虎榜）/ **fundamental**（基本面深度分析，含A股特色：股东结构）/ **both**（技术面+基本面双报告，默认）。
 
 ### 报告插件机制（可扩展报告类型）
 
@@ -155,12 +170,7 @@ reports-engine 支持**报告插件**，新增报告 = 新增一个插件文件�
 - `<报告id>.html.j2`：HTML 模板（继承 `base.html.j2` 复用统一骨架）
 
 **触发机制**：`reports-engine.run()` 在 REPORT 阶段执行，路由已**收敛为两分支**：
-- **分支 A（插件匹配）**：由 `_run_plugin_auto` 统一执行，优先级为：
-  1. `report_intent` ∈ {attribution/portfolio/execution} → 直接映射到对应插件（`_run_plugin_enhanced`，含意图产物校验）
-  2. **BACKTEST 产物存在且回测插件命中** → 回测报告（优先于默认模板，与 master 引擎 REPORT 产物判断一致）
-  3. 显式 `report_template`（technical/fundamental/both，无 BACKTEST）→ 模板类插件（`both` 多命中 → `_run_plugin_many` 联合生成技术+基本面双报告）
-  4. 其余 `find_by_trigger` 匹配（资金流等）
-  5. 全部未命中 → **兜底插件 `fallback_report`** 生成默认个股报告
+- **分支 A（插件匹配）**：由 `_run_plugin_auto` 统一执行，优先级为：① `report_intent` ∈ {attribution/portfolio/execution} → 对应插件（`_run_plugin_enhanced`，含产物校验）；② BACKTEST 产物存在且回测插件命中 → 回测报告；③ 显式 `report_template`（无 BACKTEST）→ 模板类插件（`both` 多命中 → `_run_plugin_many` 生成双报告）；④ 其余 `find_by_trigger` 匹配；⑤ 全部未命中 → 兜底插件 `fallback_report`
 - **分支 B（内置兜底）**：`_run_template_report`，仅当插件机制关闭 / 无插件命中且无兜底插件 / 匹配异常时作为终极兜底
 
 **插件触发条件**支持三种方式（plugin.yaml 的 `trigger`）：
@@ -195,7 +205,7 @@ reports-engine 支持**报告插件**，新增报告 = 新增一个插件文件�
 > 均由插件机制承载（不再有独立内置路由分支）；`backtest_report` 声明 `output_file: report.html`
 > 直接输出固定文件名，兼容下游缓存/门户/归档旧约定。
 
-**开发新报告**：复制任一插件文件夹 → 改 `plugin.yaml`（触发词/所需产物）+ `render.py` + 模板 → 放入 `plugins/` 下即可被自动扫描注册。详见 `docs/产品需求文档_报告插件化机制.md`。
+**开发新报告**：复制任一插件文件夹 → 改 `plugin.yaml`（触发词/所需产物）+ `render.py` + 模板 → 放入 `plugins/` 下即可被自动扫描注册。设计背景见 `docs/01-archive/prd/report-plugin-mechanism.md`（历史 PRD，口径以本节为准）。
 
 ### LLM 动态 Prompt 生成
 
@@ -216,8 +226,15 @@ reports-engine 的 llm_analyst 模块根据模板配置文件（`technical.yaml`
 1. ctx.external_data (Agent 系统内置工具/MCP) — 最高，直接跳过降级链
 2. ctx.data_sources (用户对话指定) — 用户通过对话明确要求时由 agent 写入
 3. 环境变量 DATA_BACKENDS — 高级用户/CI 配置
-4. 代码默认值 "baostock,akshare,websearch" — 兜底（仅真正免费源）
-5. synthetic (模拟数据兜底) — 全部失败时告知用户
+4. 代码默认值 — 兜底（仅真正免费源）
+
+   ⚠️ **口径以代码为准**：`skills/data-engine/scripts/config.py` 的 `DEFAULT_DATA_SOURCES` 为
+   `local → westock → baostock → akshare → websearch`（5 源，按优先级降级）。
+   本文件 frontmatter 的 `compatibility` 字段已同步为 `local,westock,baostock,akshare,websearch`
+   （其中 `tencent` 为历史旧名，**现名 `westock`**，同一腾讯公网直连免费源）。
+   代码真值优先，文档与代码不一致时以 `config.py` 为准。
+5. synthetic (模拟数据兜底) — 仅当 `ALLOW_SYNTHETIC_FALLBACK=true` 时启用；
+   默认 `false`（`config.py:262`），外部源全部失败即显式报错、不静默合成行情
 ```
 
 ### 用户对话式切换数据源（推荐方式）
@@ -257,9 +274,14 @@ reports-engine 的 llm_analyst 模块根据模板配置文件（`technical.yaml`
 
 | 数据源 | 说明 |
 |--------|------|
+| `local` | 本地 Parquet 缓存（不联网，免费链中优先级最高） |
+| `westock` | 腾讯公网行情直连（免费、零鉴权；旧名 `tencent`） |
 | `baostock` | 老虎量化开源项目（无需 Token） |
 | `akshare` | 聚合库爬虫（无需 Token） |
-| `websearch` | 通过 WebSearch 工具查询（终极回退） |
+| `websearch` | 通过 WebSearch 工具查询（终极回退，仅 get_daily） |
+
+> 免费链降级顺序：`local → westock → baostock → akshare → websearch`
+> （与 `skills/data-engine/scripts/config.py` 的 `DEFAULT_DATA_SOURCES` 及 `DATA_FALLBACK_RULES` 一致）。
 
 ### 精准降级
 
@@ -269,9 +291,33 @@ reports-engine 的 llm_analyst 模块根据模板配置文件（`technical.yaml`
 
 当某数据源适配器所需的第三方库尚未安装时，data-engine 不会直接跳过该数据源，而是先尝试用当前 Python 解释器自动安装依赖（`pip install`），安装成功后再加载并使用该数据源；仅当自动安装失败时才会按降级链跳到下一个数据源。
 
-- 开关：`AUTO_INSTALL_BACKENDS`（默认 `true`）
+- 开关：`AUTO_INSTALL_BACKENDS`（默认 `false`，遵循私有化纪律；置 `true` 时启用运行期自动安装）
 - 后端与 pip 包映射（见 `skills/data-engine/scripts/config.py` 的 `BACKEND_PIP_PACKAGES`）
 - 自动安装结果会被缓存，避免在同一次运行的降级链里重复安装
+- **安装镜像**：自动安装与手动安装均默认走国内加速镜像（清华 TUNA `https://pypi.tuna.tsinghua.edu.cn/simple`）。覆盖方式见下方「依赖安装镜像」。
+
+### 依赖安装（国内加速镜像）
+
+三方库安装默认走**清华 TUNA 国内加速镜像**。手动安装（推荐）用 skill 根目录的跨平台脚本（纯标准库、零依赖，自动锚定 skill 根，不受 cwd 影响）：
+
+```bash
+cd core/skills/jingni-tech/jingni-trader
+
+install.bat        # Windows
+bash install.sh    # Linux / macOS
+python install.py  # 跨平台通用
+```
+
+常用参数与镜像覆盖：
+
+```bash
+python install.py --index-url https://mirrors.aliyun.com/pypi/simple  # 覆盖镜像
+python install.py --dry-run                                          # 仅打印命令，不安装
+python install.py --requirements <路径|目录>                           # 指定依赖清单
+python install.py -- --upgrade --no-cache-dir                        # `--` 后原样透传 pip
+```
+
+> 镜像优先级：`--index-url` > `PIP_INDEX_URL` 环境变量 > 默认清华镜像。运行期自动安装（`AUTO_INSTALL_BACKENDS=true`）同样注入默认镜像，但用户已设 `PIP_INDEX_URL` 时不被覆盖；`requirements.txt` 内不写镜像源（pip 不支持）。安装失败时脚本打印备选镜像（阿里云/腾讯云）与排查建议，退出码与 pip 一致，便于 CI 判定。
 
 ### 高级：环境变量配置（可选）
 
@@ -289,51 +335,17 @@ $env:DATA_BACKENDS = "wind,tushare,baostock,akshare,websearch"
 
 ## 运行归档机制
 
-**每次运行完整流程时，自动创建归档目录保存所有过程和结果：**
-
-- 在 workspace/archives/ 下创建 `YYYYMMDD_HHMMSS` 格式的运行归档目录
-- 每个子任务在归档目录中创建 `step_N_<阶段名>` 格式的子文件夹
-- 每个步骤保存 `summary.md` 子任务小结报告
-- 全景汇总 `pipeline_summary.md` 保存在归档根目录
-
-归档目录结构：
-```
-workspace/archives/20260529_143025/
-├── pipeline_summary.md
-├── step_1_DATA/
-│   ├── summary.md
-│   └── artifacts/
-├── step_2_FACTOR/
-│   ├── summary.md
-│   └── artifacts/
-├── step_3_REPORT/
-│   ├── summary.md
-│   └── artifacts/
-...
-```
+每次运行自动在 `workspace/archives/` 下创建 `YYYYMMDD_HHMMSS` 归档目录，每阶段存入 `step_N_<阶段名>/`（含 `summary.md` 与 `artifacts/`），根目录生成全景汇总 `pipeline_summary.md`。目录结构示例见 [references/workflow_architecture.md](references/workflow_architecture.md)。
 
 ## 阶段状态机
 
-### 单一工作流 + 因子用途分支
+单一工作流，按 `strategy_required` 标志选择执行深度：默认分析路径（`False`）为 DATA → FACTOR → REPORT；策略构建路径（`True`）为完整 7 阶段管线（DATA → FACTOR → MODEL → BACKTEST → PORTFOLIO → EXECUTION → REPORT）。
 
-系统采用单一工作流，根据 `strategy_required` 标志选择执行深度：
-
-```
-                              ┌─ strategy_required=True ──→ [MODEL] → [BACKTEST] → [PORTFOLIO] → [EXECUTION] → ┐
-[DATA] → [FACTOR] → ┤                                                                                              ├→ [REPORT]
-                              └─ strategy_required=False（默认）──────────────────────────────────────────────┘
-```
-
-### 分支逻辑
-
-- **默认分析路径**（`strategy_required=False`）：因子仅用于分析，跳过 MODEL/BACKTEST/PORTFOLIO/EXECUTION，直接 DATA → FACTOR → REPORT
-- **策略构建路径**（`strategy_required=True`）：完整 7 阶段管线，REPORT 阶段根据 BACKTEST 产物存在性自动生成绩效报告
-- 回测失败 → 返回因子调优
-- 模型过拟合 → 触发样本外再验证
+完整分支图、各阶段失败回退逻辑见 [references/workflow_architecture.md](references/workflow_architecture.md) §阶段状态机。
 
 ## LLM 内容注入
 
-个股分析报告中包含 LLM 占位符（`<!--LLM_TECHNICAL_ANALYSIS_PLACEHOLDER-->` / `<!--LLM_FUNDAMENTAL_ANALYSIS_PLACEHOLDER-->`），agent 可在 `run_pipeline()` 时传入 `llm_responses` 参数自动替换：
+个股报告含 LLM 占位符（`<!--LLM_TECHNICAL_ANALYSIS_PLACEHOLDER-->` / `<!--LLM_FUNDAMENTAL_ANALYSIS_PLACEHOLDER-->`），调用 `run_pipeline()` 时传入 `llm_responses` 参数即自动替换：
 
 ```python
 result = engine.run_pipeline(
@@ -347,30 +359,37 @@ result = engine.run_pipeline(
 
 ## Context 对象
 
-标准化的上下文对象，包含以下字段：
+标准化上下文对象（task_id / user_intent / current_stage / target_stages / stock_pool / start_date / end_date / artifacts / metadata / errors 等）。
 
-| 字段名 | 类型 | 说明 |
-|--------|------|------|
-| task_id | str | 当前任务ID（YYYYMMDDHHMMSS） |
-| session_id | str | 会话ID |
-| user_intent | str | 用户原始意图 |
-| current_stage | str | 当前所处阶段 |
-| target_stages | List[str] | 目标阶段列表 |
-| stock_pool | List[str] | 股票池（股票代码列表，空列表=全市场） |
-| benchmark | str | 基准指数代码（默认 000300.SH） |
-| start_date | str | 开始日期 |
-| end_date | str | 结束日期 |
-| strategy_name | str | 策略名称 |
-| strategy_params | Dict[str, Any] | 策略参数字典 |
-| artifacts | Dict[str, str] | 已完成阶段产物路径 |
-| external_data | Dict[str, Any] | 系统内置工具传入的外部数据 |
-| data_sources | Optional[List[str]] | data-engine 专用：用户对话指定的数据源优先级链（None 时走环境变量/默认值） |
-| run_dir | str | 当前运行归档目录路径 |
-| step_dirs | Dict[str, str] | 各步骤归档子目录路径 |
-| metadata | Dict[str, Any] | 各阶段元数据（含 strategy_required、report_template、factor_source、report_intent 等） |
-| errors | List[str] | 错误记录 |
+完整字段表、类型与默认值见 [references/context_protocol.md](references/context_protocol.md)。
+
+## 使用流程
+
+### 环境准备（首次使用必读）
+
+运行前先检查依赖完整性；若依赖缺失（如 `import pandas` / `import plotly` 报 ModuleNotFoundError），运行 skill 根目录安装脚本预装：
+
+```bash
+cd core/skills/jingni-tech/jingni-trader
+python install.py      # 默认走清华 TUNA 国内加速镜像
+```
+
+更多参数（`--dry-run` / `--index-url` 等）见上文「依赖安装（国内加速镜像）」。
 
 ## 使用示例
+
+### CLI 运行（常用）
+
+```bash
+python engine.py -i "帮我用近3年A股数据做一个20日反转因子选股回测"
+python engine.py -i "分析 002594.SZ 比亚迪的技术面和基本面"
+python engine.py -c ./workspace/context.json        # 用已有 Context JSON 恢复运行
+python engine.py -i "生成上个月实盘绩效报告" -o ./workspace/result.json
+python engine.py -i "分析比亚迪基本面" --force       # 忽略缓存，重跑所有阶段
+```
+
+> **CLI 参数集（实测口径）**：仅支持 `-i/--input`（必填）、`-c/--context`、`-o/--output`、`--force` 四个参数。
+> 股票池、日期范围等任务参数请在 `-i` 的自然语言描述中指定（如 `"分析 002594.SZ 比亚迪"`），由意图解析自动提取。
 
 ### Python API
 
@@ -378,50 +397,22 @@ result = engine.run_pipeline(
 from engine import run, MasterEngine
 from scripts.context import Context
 
-# 创建 Context
 ctx = Context(
     task_id="task_001",
     user_intent="帮我用近3年A股数据做一个20日反转因子选股回测",
     current_stage="IDLE"
 )
-
-# 运行主流程
 result = run(ctx)
-print(result)
 
 # 个股分析（含 LLM 内容注入）
 engine = MasterEngine()
 result = engine.run_pipeline(
     user_input="分析 002594.SZ 比亚迪的技术面和基本面",
-    llm_responses={
-        "technical": {...},
-        "fundamental": {...},
-    }
+    llm_responses={"technical": {...}, "fundamental": {...}}
 )
 ```
 
-### CLI 运行
-
-```bash
-# 交互式输入
-python engine.py -i "帮我用近3年A股数据做一个20日反转因子选股回测"
-
-# 指定参数
-python engine.py -i "分析 002594.SZ 比亚迪的技术面和基本面"
-
-# 用已有 Context JSON 恢复运行
-python engine.py -c ./workspace/context.json
-
-# 仅生成报告（输出到指定 JSON 文件）
-python engine.py -i "生成上个月实盘绩效报告" -o ./workspace/result.json
-
-# 强制刷新（忽略缓存，重新执行所有阶段）
-python engine.py -i "分析比亚迪基本面" --force
-```
-
-> 说明：当前 CLI 仅支持 `-i/--input`（必填）、`-c/--context`、`-o/--output`、`--force` 四个参数。
-> 股票池、日期范围等任务参数请在 `-i` 的自然语言描述中指定（如 `"分析 002594.SZ 比亚迪"`），
-> 由意图解析自动提取，无需额外的命令行参数。
+完整 API 签名、Context 构造与更多示例见 [references/api_reference.md](references/api_reference.md)。
 
 ## 子 Skill 映射
 
@@ -434,6 +425,30 @@ python engine.py -i "分析比亚迪基本面" --force
 | PORTFOLIO | portfolio-risk-engine | 组合优化与风控 |
 | EXECUTION | execution-monitor-engine | 实盘执行与监控 |
 | REPORT | reports-engine | 量化绩效报告 / 个股分析报告 |
+
+## 数据源 / 交易文档索引
+
+各子引擎 `references/` 下的技术参考文档（按职责拆分：数据获取 `_data.md` 归 data-engine，实盘交易 `_trading.md` 归 execution-monitor-engine）：
+
+> **仓库层级说明（重要）**：本 skill 的单一权威源是 `core/skills/jingni-tech/jingni-trader/`，
+> 同步链为单向（权威源 → `d:/codebuddy/jingni-trader` → GitHub），禁止反向覆盖。
+> `core/ir/_shared/skills/jingni-trader/` 是本文件单向镜像出的**裁剪引用版**，不独立演进——
+> `execution-monitor-engine` 仅保留 `references/`，实盘运行代码按红线剔除不并入共享层。
+> 因此本文档中出现的 `execution-monitor-engine` 均为**编排关系与能力声明**。
+> 完整规范见 `knowledge/engineering/jingni-trader-source-of-truth.md`。
+
+**数据引擎（data-engine，6 份数据源文档）**
+- `skills/data-engine/references/westock_data.md` — weStock 数据命令参考
+- `skills/data-engine/references/baostock_data.md` — 宝盛开源行情数据接口
+- `skills/data-engine/references/akshare_data.md` — AKShare 开源财经数据源
+- `skills/data-engine/references/xtquant_data.md` — 迅投 XtData 行情模块
+- `skills/data-engine/references/tdxquant_data.md` — 通达信量化数据接口
+- `skills/data-engine/references/gm_data.md` — 掘金量化数据接口
+
+**执行监控（execution-monitor-engine，3 份交易文档）**
+- `skills/execution-monitor-engine/references/xtquant_trading.md` — miniQMT 交易模块
+- `skills/execution-monitor-engine/references/tdxquant_trading.md` — 通达信交易接口
+- `skills/execution-monitor-engine/references/gm_trading.md` — 掘金交易函数/事件
 
 ## jingni-datafeed 自动部署
 
@@ -448,24 +463,24 @@ jingni-trader 可选依赖 `jingni-datafeed`（惊泥因子库 datafeed 服务�
 ```bash
 cd jingni-trader
 git clone https://github.com/duhanjun/jingni-datafeed.git skills/jingni-datafeed
-cp skills/jingni-datafeed/.env.example skills/jingni-datafeed/.env
-# 编辑 skills/jingni-datafeed/.env 填入 JINGNI_URL / JINGNI_TOKEN
+cp skills/jingni-datafeed/.env.example skills/jingni-datafeed/.env   # 编辑填入 JINGNI_URL / JINGNI_TOKEN
 ```
 
-## 里程碑检查点
+## 里程碑检查点与错误处理
 
-每个子 Skill 完成后自动检查：
+每个子 Skill 完成后自动检查**产物完整性**与**基本合理性**，失败时给出清晰错误码并支持从断点重试；所有子 Skill 调用均含异常捕获、明确错误信息与优雅降级策略。
 
-- 产物完整性
-- 基本合理性
-- 失败时给出清晰错误码
-- 支持从断点重试
+## 交易模式与合规口径
 
-## 错误处理
+> **责任主体：风控官魏预警**（jingni-trader 执行与风控口径责任人）
+> 本节的对外表述由风控官负责，任何改动须经风控官复核。
 
-- 所有子 Skill 调用包含异常捕获
-- 明确的错误信息和建议
-- 优雅降级策略
+**一句话结论**：默认 paper 模拟交易，不触碰真实资金；live 实盘需显式配置 `TRADE_MODE=live` + `TRADE_BACKEND` 才会真实报单，且**当前 live 链路不受本引擎硬风控断路器约束**——启用实盘等同自行承担全部风险。
+
+完整风险卡片（逐条代码依据）、**合规边界（禁止类/特别监管类）**、启用实盘前强制确认清单与免责声明见
+[references/compliance-trading-mode.md](references/compliance-trading-mode.md)。
+
+> **免责声明（投资内容强制三段式）**：仅模拟、绝不下单、不构成投资建议。默认 paper 模式不触碰真实资金；live 实盘为使用者显式开启后以其自身券商账户执行，非本工具主动代客下单，风险由使用者自行承担。
 
 ## 配置说明
 
@@ -482,3 +497,10 @@ cp skills/jingni-datafeed/.env.example skills/jingni-datafeed/.env
 ## 工作流架构
 
 详见 [references/workflow_architecture.md](references/workflow_architecture.md)
+
+## 版本历史
+
+| 版本 | 日期 | 变更摘要 |
+|------|------|---------|
+| 1.1.0 | 2026-08-27 | 新增「交易模式与合规口径」章节与 `references/compliance-trading-mode.md`；README 补投资合规免责声明（责任主体：风控官魏预警）；修正 `when_not_to_use` 与 `compliance` 的实盘能力表述（原称"不用于真实下单交易"，与代码能力不符）；SKILL.md 正文瘦身至 FR-06 的 500 行约束内，明细外置 `references/`；免费降级链口径由 `tencent` 统一为 `westock` |
+| 1.0.0 | 2026-08-14 | 首个版本：七子引擎全链路编排、报告插件化机制、11 数据源降级链 |
