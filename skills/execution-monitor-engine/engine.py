@@ -24,6 +24,7 @@ from scripts.config import (
     SLIPPAGE, AUDIT_LOG_PATH, ACCOUNT_STATE_PATH
 )
 from scripts.base.base_executor import BaseExecutor
+from scripts.base.circuit_breaker import CircuitBreaker
 from scripts.paper_ledger import (
     PaperTradeRecordV1, AccountSnapshot, PositionState,
     append_paper_trade, replay_ledger, migrate_legacy_state,
@@ -92,43 +93,18 @@ class Account:
         }
 
 
-class CircuitBreaker:
-    """硬风控断路器"""
+class PaperCircuitBreaker(CircuitBreaker):
+    """paper 路径断路器：阈值动态取自 engine 模块全局变量。
 
-    def __init__(self):
-        self.last_order_times: List[float] = []
+    ``CircuitBreaker`` 下沉到 ``scripts/base/`` 后，其默认实现读的是
+    ``scripts.config`` 的构造期快照。但 engine 模块在导入时把 config 的值
+    **复制**成了自己的模块级全局（MAX_SINGLE_ORDER_RATIO 等），既有测试与
+    运行期调参都是通过改这些全局完成的。故此处覆写 ``_thresholds``，
+    每次检查实时回读 engine 模块的当前全局值。
+    """
 
-    def check_send_order(
-        self,
-        account: Account,
-        code: str,
-        order_value: float,
-        prices: Optional[Dict[str, float]] = None,
-    ) -> Dict[str, Any]:
-        """检查是否可以发单"""
-        current_nav = account.get_current_nav(prices)
-        daily_return = (current_nav - account.start_of_day_nav) / account.start_of_day_nav if account.start_of_day_nav > 0 else 0
-
-        checks = {
-            "daily_loss": daily_return > -MAX_DAILY_LOSS_RATIO,
-            "single_order_size": order_value <= current_nav * MAX_SINGLE_ORDER_RATIO,
-            "frequency": self._check_frequency(),
-        }
-
-        if not checks["daily_loss"]:
-            return {"allowed": False, "reason": f"单日亏损 {daily_return:.2%} 超过阈值 {MAX_DAILY_LOSS_RATIO:.2%}"}
-        if not checks["single_order_size"]:
-            return {"allowed": False, "reason": f"单笔金额 {order_value:.0f} 超过上限 {current_nav * MAX_SINGLE_ORDER_RATIO:.0f}"}
-        if not checks["frequency"]:
-            return {"allowed": False, "reason": f"订单频率超过每秒 {MAX_ORDER_FREQUENCY} 次限制"}
-
-        self.last_order_times.append(time.time())
-        return {"allowed": True, "reason": ""}
-
-    def _check_frequency(self) -> bool:
-        now = time.time()
-        self.last_order_times = [t for t in self.last_order_times if now - t < 1.0]
-        return len(self.last_order_times) < MAX_ORDER_FREQUENCY
+    def _thresholds(self):
+        return MAX_DAILY_LOSS_RATIO, MAX_SINGLE_ORDER_RATIO, MAX_ORDER_FREQUENCY
 
 
 class AuditLogger:
@@ -175,8 +151,11 @@ class PaperExecutor(BaseExecutor):
     """模拟交易执行器（P1-1: 集成追加式 JSONL 账本）"""
 
     def __init__(self, init_capital: float = INIT_CAPITAL):
+        super().__init__()
         self.account = Account(nav=init_capital, available_cash=init_capital)
-        self.circuit_breaker = CircuitBreaker()
+        # 用 paper 专用子类替换基类实例：阈值实时回读 engine 全局，
+        # 保证 monkeypatch.setattr(engine, "MAX_*") 仍然生效（见 PaperCircuitBreaker 说明）
+        self.circuit_breaker = PaperCircuitBreaker()
         self.audit = AuditLogger()
         self.orders: Dict[str, Dict] = {}
 

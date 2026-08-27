@@ -14,7 +14,7 @@ class XtQuantExecutor(BaseExecutor):
     """迅投miniQMT交易执行适配器"""
 
     def __init__(self):
-        self._logger = logging.getLogger(self.__class__.__name__)
+        super().__init__()
         self._connected = False
         self._available = False  # 是否可用(已连接且订阅成功)
         self._xt_trader = None
@@ -124,6 +124,13 @@ class XtQuantExecutor(BaseExecutor):
         """
         if not self._ensure_connected():
             return {"success": False, "error": "miniQMT 未连接"}
+
+        # 硬风控：下单频率 + 单笔金额占比（实盘下单前必须过闸，拒单直接返回）
+        guard = self._live_risk_guard(code, volume, price)
+        if guard is not None:
+            self._logger.warning(f"miniQMT 订单被硬风控拦截: {guard['error']}")
+            return guard
+
         try:
             from xtquant.xtconstant import STOCK_BUY, STOCK_SELL, FIX_PRICE, LATEST_PRICE
 

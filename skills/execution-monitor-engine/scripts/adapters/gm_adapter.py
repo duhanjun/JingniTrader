@@ -14,7 +14,7 @@ class GMExecutor(BaseExecutor):
     """掘金量化交易执行适配器"""
 
     def __init__(self):
-        self._logger = logging.getLogger(self.__class__.__name__)
+        super().__init__()
         self._connected = False
         self._available = False  # 是否可用(已连接)
         self._gm = None
@@ -148,6 +148,13 @@ class GMExecutor(BaseExecutor):
         """
         if not self._available:
             return {"success": False, "error": "掘金终端未连接"}
+
+        # 硬风控：下单频率 + 单笔金额占比（实盘下单前必须过闸，拒单直接返回）
+        guard = self._live_risk_guard(code, volume, price)
+        if guard is not None:
+            self._logger.warning(f"掘金订单被硬风控拦截: {guard['error']}")
+            return guard
+
         try:
             gm_side = 1 if side.lower() == "buy" else 2
             order_style = 1 if order_type == "market" else 2
