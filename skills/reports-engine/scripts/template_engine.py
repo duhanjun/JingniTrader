@@ -1,7 +1,13 @@
 """
-报告模板引擎
+报告模板公共计算引擎
 
-根据模板配置（YAML）从 factor_data.parquet 和 price_data.parquet 生成 HTML 报告。
+根据模板配置（YAML）从 factor_data.parquet 和 price_data.parquet 计算技术/
+基本面报告所需数据（渲染各章节 HTML 片段 + LLM prompt），返回渲染 context。
+不组装完整 HTML、不写文件——完整 HTML 组装由 technical_report /
+fundamental_report 插件（自带 .j2 模板）与 fallback_report 兜底插件承担。
+
+对外入口：``compute_report_data(template_id, ctx)``（供上述插件复用）。
+
 报告结构 = 固定章节(行情数据 + 深度解读 + 风险提示) + 因子组合章节(N个)
 
 数据流向：
@@ -19,34 +25,7 @@ from datetime import datetime
 
 import pandas as pd
 
-# 惊泥科技统一样式公共组件（顶部导航栏 + 底部版权栏，与门户页/交易监控报告一致）
-try:
-    from scripts.templates.common_components import (
-        build_nav_bar_css, build_nav_bar_html, build_footer_html,
-    )
-except Exception:  # pragma: no cover - 兼容旧部署
-    def build_nav_bar_css() -> str: return ""
-    def build_nav_bar_html(report_title: str = "") -> str: return ""
-    def build_footer_html() -> str: return ""
-
 logger = logging.getLogger("template_engine")
-
-# 各报告定制免责声明（按 template_name 匹配）
-_DISCLAIMERS = {
-    "技术分析报告": (
-        "本报告由 JingniTrader 基于历史行情数据自动生成，仅供学习研究用途，不构成任何投资建议。"
-        "技术分析指标（均线、MACD、RSI、KDJ 等）均基于历史价格计算，具有滞后性，"
-        "对未来走势的预测存在较大不确定性。技术信号可能因市场环境变化而失效，"
-        "请勿仅依据本报告技术分析结论进行交易决策，实盘交易有风险，请谨慎操作。"
-    ),
-    "基本面分析报告": (
-        "本报告由 JingniTrader 基于公开财务数据与估值数据自动生成，仅供学习研究用途，"
-        "不构成任何投资建议。财务数据来源于历史定期报告与公告，存在更新滞后，"
-        "且公司经营、行业环境与市场估值均可能发生超出预期的变化。"
-        "估值判断（如 PE/PB 分位）具有主观性，不同方法结论可能不同。"
-        "投资决策请结合最新公开信息独立判断，实盘交易有风险，请谨慎操作。"
-    ),
-}
 
 
 # 模板配置目录
@@ -126,52 +105,61 @@ def _parse_simple_yaml(yaml_path: str) -> Dict[str, Any]:
     return config
 
 
-class ReportTemplateEngine:
-    """报告模板引擎"""
+def compute_report_data(template_id: str, ctx) -> Dict[str, Any]:
+    """（公共）计算技术/基本面报告所需数据，返回渲染 context。
+
+    供 technical_report / fundamental_report 插件自包含渲染复用：
+    读取 DATA/FACTOR → 选股 → 渲染行情/因子/深度/风险章节。
+    返回 dict 含组装 HTML 所需的全部变量 + llm_prompt，不组装 HTML、不写文件。
+
+    返回 dict 结构：
+        {template_id, template_name, analyst_type, stock_code, stock_name,
+         current_price, data_date, market_html, factor_sections_html,
+         deep_html, risk_html, llm_prompt, config, success, error}
+    """
+    engine = ComputeReportDataEngine()
+    return engine._compute_report_data(template_id, ctx)
+
+
+class ComputeReportDataEngine:
+    """报告数据计算引擎（只做计算，不组装 HTML、不写文件）"""
 
     def __init__(self):
         self._kline_chart_module = None
 
-    def generate(
-        self,
-        template_id: str,
-        ctx,
-        output_path: str,
-    ) -> Dict[str, Any]:
-        """根据模板生成 HTML 报告
+    # ------------------------------------------------------------------
+    # 公共计算（供技术/基本面插件自包含渲染复用，阶段 A）
+    # ------------------------------------------------------------------
 
-        参数:
-            template_id: 模板ID (technical / fundamental)
-            ctx: Context 对象，需包含 artifacts['DATA'] 和 artifacts['FACTOR']
-            output_path: 输出文件路径
+    def _compute_report_data(self, template_id: str, ctx) -> Dict[str, Any]:
+        """计算技术/基本面报告所需数据，返回渲染 context（不组装 HTML、不写文件）。
 
-        返回:
-            {
-                "success": bool,
-                "artifact_path": str,
-                "llm_prompts": dict,  # 供 agent 调用 LLM
-                "error": str
-            }
+        计算编排：加载配置 → 读 DATA/FACTOR → 选股 →
+        渲染行情/因子/深度/风险章节 → 返回组装 HTML 所需全部变量。
+
+        返回 dict 结构：
+            {template_id, template_name, analyst_type, stock_code, stock_name,
+             current_price, data_date, market_html, factor_sections_html,
+             deep_html, risk_html, llm_prompt, config, success, error}
         """
-        # 1. 加载模板配置
         config = _load_yaml_config(template_id)
         if not config:
-            return {"success": False, "artifact_path": "", "llm_prompts": {}, "error": f"模板 {template_id} 加载失败"}
+            return {"success": False, "error": f"模板 {template_id} 加载失败"}
 
         template_name = config.get("template_name", template_id)
         analyst_type = config.get("analyst_type", template_id)
-        logger.info(f"开始生成报告: {template_name} (template_id={template_id})")
+        logger.info(f"开始计算报告数据: {template_name} (template_id={template_id})")
 
-        # 2. 读取数据
+        # 读取数据
         data_path = ctx.get_artifact("DATA") if hasattr(ctx, 'get_artifact') else None
         factor_path = ctx.get_artifact("FACTOR") if hasattr(ctx, 'get_artifact') else None
 
         if not data_path or not os.path.exists(data_path):
-            return {"success": False, "artifact_path": "", "llm_prompts": {}, "error": "缺少 DATA 产物"}
+            return {"success": False, "error": "缺少 DATA 产物"}
 
         price_data = pd.read_parquet(data_path)
         if price_data.empty:
-            return {"success": False, "artifact_path": "", "llm_prompts": {}, "error": "行情数据为空"}
+            return {"success": False, "error": "行情数据为空"}
 
         factor_data = pd.DataFrame()
         if factor_path and os.path.exists(factor_path):
@@ -180,9 +168,7 @@ class ReportTemplateEngine:
             except Exception as e:
                 logger.warning(f"读取因子数据失败: {e}")
 
-        # 优先使用 ctx.stock_pool 指定的标的（个股分析场景），避免多标的
-        # 数据时误取首行代码导致选错股票。仅当 ctx.stock_pool 为空或数据中
-        # 无匹配时才回退到数据首行代码。
+        # 优先使用 ctx.stock_pool 指定的标的
         stock_code = ""
         if hasattr(ctx, 'stock_pool') and getattr(ctx, 'stock_pool', None):
             for code in ctx.stock_pool:
@@ -196,13 +182,10 @@ class ReportTemplateEngine:
         current_price = float(ohlcv.iloc[-1]['close']) if len(ohlcv) > 0 else 0.0
         data_date = str(ohlcv.iloc[-1]['date'])[:10] if len(ohlcv) > 0 else ""
 
-        # 3. 渲染固定章节
+        # 渲染固定章节
         fixed_cfg = config.get("fixed_sections", {})
-
-        # 3a. 行情数据章节（K线图，直接读 price_data）
         market_html = self._render_market_data(fixed_cfg.get("market_data", {}), ohlcv, stock_code)
 
-        # 3b. 因子组合章节
         factor_sections_html = ""
         all_factor_values_for_llm: Dict[str, Any] = {}
         for group_cfg in config.get("factor_groups", []):
@@ -210,7 +193,6 @@ class ReportTemplateEngine:
             factor_sections_html += section_html
             all_factor_values_for_llm.update(factor_values)
 
-        # 3c. 深度解读章节（LLM 占位符）
         llm_prompt = self._prepare_llm_prompt(analyst_type, stock_code, stock_name,
                                                current_price, data_date, all_factor_values_for_llm,
                                                template_config=config)
@@ -220,37 +202,24 @@ class ReportTemplateEngine:
     <!--LLM_{"TECHNICAL" if analyst_type == "technical" else "FUNDAMENTAL"}_ANALYSIS_PLACEHOLDER-->
 </div>'''
 
-        # 3d. 风险提示章节
         risk_html = self._render_risk_warning(fixed_cfg.get("risk_warning", {}), all_factor_values_for_llm)
-
-        # 4. 组装 HTML
-        html = self._assemble_html(
-            template_name=template_name,
-            stock_code=stock_code,
-            stock_name=stock_name,
-            current_price=current_price,
-            data_date=data_date,
-            market_html=market_html,
-            factor_sections_html=factor_sections_html,
-            deep_html=deep_html,
-            risk_html=risk_html,
-        )
-
-        # 5. 写入文件
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        with open(output_path, "w", encoding="utf-8") as f:
-            f.write(html)
-        logger.info(f"报告已生成: {output_path}")
-
-        llm_prompts = {}
-        if llm_prompt:
-            llm_prompts[analyst_type] = llm_prompt
 
         return {
             "success": True,
-            "artifact_path": output_path,
-            "llm_prompts": llm_prompts,
             "error": "",
+            "template_id": template_id,
+            "template_name": template_name,
+            "analyst_type": analyst_type,
+            "stock_code": stock_code,
+            "stock_name": stock_name,
+            "current_price": current_price,
+            "data_date": data_date,
+            "market_html": market_html,
+            "factor_sections_html": factor_sections_html,
+            "deep_html": deep_html,
+            "risk_html": risk_html,
+            "llm_prompt": llm_prompt,
+            "config": config,
         }
 
     # ------------------------------------------------------------------
@@ -506,150 +475,3 @@ class ReportTemplateEngine:
         if factor_name == "pe_ttm" and value > 100:
             return f"PE(TTM) {value:.1f} 倍偏高，估值风险"
         return None
-
-    # ------------------------------------------------------------------
-    # HTML 组装
-    # ------------------------------------------------------------------
-
-    def _assemble_html(
-        self,
-        template_name: str,
-        stock_code: str,
-        stock_name: str,
-        current_price: float,
-        data_date: str,
-        market_html: str,
-        factor_sections_html: str,
-        deep_html: str,
-        risk_html: str,
-    ) -> str:
-        """组装完整 HTML 报告（惊泥科技统一样式：顶部导航栏 + 正文卡片 + 底部版权栏）"""
-        now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
-        # 惊泥科技公共组件（与门户页 / 交易监控报告样式一致）
-        nav_css = build_nav_bar_css()
-        nav_html = build_nav_bar_html(report_title="")
-        footer_html = build_footer_html(disclaimer=_DISCLAIMERS.get(template_name, ""))
-
-        return f'''<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{template_name} - {stock_name}({stock_code})</title>
-    <style>
-        /* ═══ 惊泥科技配色卡 ═══
-           主色 #17223b | 辅助 #263859 | 文字 #6b778d | 强调 #ff6768 */
-        :root {{
-            --jm-primary: #17223b;
-            --jm-secondary: #263859;
-            --jm-text: #6b778d;
-            --jm-accent: #ff6768;
-            --bg: #f5f6f8; --card-bg: #ffffff;
-            --text: #17223b; --text-muted: #6b778d; --border: #e5e7eb;
-            --up: #ff6768; --down: #12a05c;
-            --danger: #ff6768; --warning: #f59e0b; --success: #10b981;
-            --shadow: 0 1px 3px rgba(23,34,59,0.08);
-        }}
-        * {{ box-sizing: border-box; }}
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-               max-width: 1200px; margin: 0 auto; padding: 20px; background: var(--bg); color: var(--text); }}
-        .header {{ background: linear-gradient(135deg, #17223b, #263859); color: white;
-                   padding: 30px 40px; border-radius: 12px; margin-bottom: 24px;
-                   border-bottom: 3px solid var(--jm-accent);
-                   box-shadow: 0 4px 12px rgba(23,34,59,0.15); }}
-        .header h1 {{ margin: 0 0 8px 0; font-size: 26px; }}
-        .header p {{ margin: 0; opacity: 0.9; font-size: 14px; }}
-        .section {{ background: var(--card-bg); border-radius: 10px; padding: 24px; margin-bottom: 20px;
-                    box-shadow: var(--shadow); border: 1px solid #f3f4f6; }}
-        .section h2 {{ margin: 0 0 16px 0; font-size: 18px; color: var(--jm-primary);
-                       border-bottom: 2px solid var(--jm-accent); padding-bottom: 8px; }}
-        .chart-container {{ width: 100%; overflow-x: auto; }}
-        .metrics-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-                         gap: 16px; }}
-        .metric-card {{ background: #f9f9f9; padding: 16px; border-radius: 8px; text-align: center;
-                        border: 1px solid #eee; }}
-        .metric-card.positive {{ border-left: 3px solid #12a05c; }}
-        .metric-card.negative {{ border-left: 3px solid #ff6768; }}
-        .metric-value {{ font-size: 24px; font-weight: 700; color: var(--text); }}
-        .metric-card.positive .metric-value {{ color: #12a05c; }}
-        .metric-card.negative .metric-value {{ color: #ff6768; }}
-        .metric-label {{ font-size: 12px; color: var(--text-muted); margin-top: 4px; }}
-        .signal-tag {{ display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px;
-                       margin-left: 6px; }}
-        .signal-bullish {{ background: #d1fae5; color: #10b981; }}
-        .signal-bearish {{ background: #fee2e2; color: #ff6768; }}
-        .signal-neutral {{ background: #f5f5f5; color: var(--text-muted); }}
-        .analysis-hint {{ color: var(--text-muted); font-size: 13px; font-style: italic; margin-bottom: 12px; }}
-        .no-data {{ color: var(--text-muted); text-align: center; padding: 20px; }}
-        table {{ width: 100%; border-collapse: collapse; margin-top: 10px; }}
-        th, td {{ padding: 10px 14px; text-align: left; border-bottom: 1px solid #f3f4f6; }}
-        th {{ background: var(--bg); font-weight: 600; color: var(--text-muted); }}
-        tbody tr:hover {{ background: #f9fafb; }}
-        .percentile-list {{ display: flex; flex-direction: column; gap: 12px; }}
-        .percentile-item {{ display: flex; align-items: center; gap: 12px; }}
-        .percentile-label {{ width: 120px; font-size: 13px; color: #555; }}
-        .percentile-bar-container {{ flex: 1; height: 20px; background: #eee; border-radius: 10px; overflow: hidden; }}
-        .percentile-bar {{ height: 100%; border-radius: 10px; transition: width 0.3s; }}
-        .percentile-bar.overvalued {{ background: #ff6768; }}
-        .percentile-bar.undervalued {{ background: #12a05c; }}
-        .percentile-bar.fair {{ background: #263859; }}
-        .percentile-value {{ width: 120px; font-size: 13px; font-weight: 600; }}
-        .level-tag {{ font-size: 11px; padding: 1px 6px; border-radius: 8px; margin-left: 4px; }}
-        .level-tag.overvalued {{ background: #fee2e2; color: #ff6768; }}
-        .level-tag.undervalued {{ background: #d1fae5; color: #12a05c; }}
-        .level-tag.fair {{ background: #e8eaf0; color: #17223b; }}
-        .band-table td:first-child {{ font-weight: 600; }}
-        .band-table .upper td:last-child {{ color: #ff6768; }}
-        .band-table .lower td:last-child {{ color: #12a05c; }}
-        .band-width {{ margin-top: 8px; font-size: 13px; color: var(--text-muted); }}
-        .trend-list {{ display: flex; flex-direction: column; gap: 10px; }}
-        .trend-item {{ display: flex; justify-content: space-between; padding: 10px 14px; background: #f9f9f9; border-radius: 6px; }}
-        .trend-label {{ color: #555; }}
-        .trend-value {{ font-weight: 600; }}
-        .trend-up {{ color: #ff6768; }}
-        .trend-down {{ color: #12a05c; }}
-        .flow-table .flow-in {{ color: #ff6768; font-weight: 600; }}
-        .flow-table .flow-out {{ color: #12a05c; font-weight: 600; }}
-        .event-list {{ display: flex; flex-direction: column; gap: 10px; }}
-        .event-item {{ display: flex; justify-content: space-between; padding: 10px 14px; background: #f9f9f9; border-radius: 6px; }}
-        .holder-table .holder-increase {{ color: #ff6768; font-weight: 600; }}
-        .holder-table .holder-decrease {{ color: #12a05c; font-weight: 600; }}
-        .risk-list {{ padding-left: 20px; }}
-        .risk-list li {{ margin-bottom: 8px; color: #555; }}
-        @media (max-width: 1024px) {{
-            body {{ padding: 16px; }}
-            .metrics-grid {{ grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }}
-            .header {{ padding: 24px; }}
-            .header h1 {{ font-size: 22px; }}
-        }}
-        @media (max-width: 640px) {{
-            body {{ padding: 12px; }}
-            .metrics-grid {{ grid-template-columns: 1fr 1fr; gap: 12px; }}
-            .section {{ padding: 16px; }}
-            .section h2 {{ font-size: 16px; }}
-            .header {{ padding: 20px; }}
-            .header h1 {{ font-size: 20px; }}
-            .header p {{ font-size: 12px; }}
-            table {{ font-size: 12px; }}
-            th, td {{ padding: 6px 8px; }}
-        }}
-        {nav_css}
-    </style>
-</head>
-<body>
-{nav_html}
-
-<div class="header">
-    <h1>{template_name} — {stock_name}({stock_code})</h1>
-    <p>数据日期: {data_date} | 当前价: {current_price:.2f} | 生成时间: {now}</p>
-</div>
-
-{market_html}
-{factor_sections_html}
-{deep_html}
-{risk_html}
-
-{footer_html}
-</body>
-</html>'''

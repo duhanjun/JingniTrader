@@ -5,9 +5,17 @@ icon: "🏢"
 version: "1.0.0"
 enabled: true
 
-# 触发条件：明确请求基本面分析报告时（report_intent=fundamental）
+# 兼容的 report_type 元数据（与内置 fundamental 报告类型一致）
+report_type: fundamental
+
+# 触发条件：
+# - report_intent=fundamental（旧字段兼容）
+# - report_template=fundamental（显式模板请求，单意图）
+# - report_template=both（多命中聚合：与 technical_report 联合生成两份报告）
 trigger:
   - { field: report_intent, equals: fundamental }
+  - { field: report_template, equals: fundamental }
+  - { field: report_template, equals: both }
 
 # 所需产物：DATA 行情数据
 requires:

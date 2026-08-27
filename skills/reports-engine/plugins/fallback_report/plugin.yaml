@@ -1,0 +1,24 @@
+# 兜底插件 — 无任何插件命中时承担默认个股报告（技术面 + 基本面）
+id: fallback_report
+label: 个股分析兜底
+icon: "📄"
+version: "1.0.0"
+enabled: true
+
+# 声明为兜底插件：无任何显式意图/产物命中时自动承担默认报告。
+# 有插件命中时兜底插件不生效。
+fallback: true
+
+# 不设显式 trigger（兜底语义，仅当 find_by_trigger 无命中时由引擎调用）
+trigger: []
+
+# 所需产物：空（兜底默认报告基于 DATA 生成，缺失时由渲染内核自行兜底）
+requires: []
+
+# 兼容的 report_type 元数据
+report_type: fallback
+
+# 门户注册
+portal:
+  enabled: true
+  display_order: 99

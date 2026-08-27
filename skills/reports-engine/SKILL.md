@@ -78,15 +78,52 @@ trigger_keywords:
 
 ## 概述
 
-reports-engine 是 A 股量化投研的**绩效归因与可视化报告引擎**，支持三种报告类型：
+reports-engine 是 A 股量化投研的**绩效归因与可视化报告引擎**，支持多种报告类型。所有报告均统一走**自包含插件**路径，插件 render.py 不依赖 engine.py 内部函数（包括 fallback_report 也已自包含，委托 technical_report / fundamental_report 两个插件渲染，不再回调 engine 内部函数）。
 
-### 报告路由优先级
+### 报告路由优先级（已收敛为纯插件匹配 + 兜底插件）
 
-| 优先级 | 触发条件 | 报告类型 | 回答的问题 |
-|--------|---------|---------|-----------|
-| 1 | `report_intent == "attribution"` | 绩效归因报告 | 实盘盈亏来自哪里？ |
-| 2 | 有 BACKTEST 产物 | 回测绩效报告 | 策略理论上能赚钱吗？ |
-| 3 | 默认 | 个股分析报告 | 这只股票现在值得买吗？ |
+路由在 `run()` 内收敛为**两分支**，二者均经自包含插件路径生成报告：
+- **分支 A（ENABLE_PLUGIN）**：统一由 `_run_plugin_auto` 执行插件匹配（含多命中聚合、
+  自定义输出文件名、fallback 兜底）。
+- **分支 B（无插件机制 / 异常兜底）**：`_run_builtin_fallback`，直接运行兜底插件
+  `fallback_report` 生成默认个股技术/基本面报告（不再存在独立的「内置模板内核」HTML
+  组装路径；旧 `_run_template_report` 已删除，其 HTML 组装能力由插件渲染替代）。
+
+attribution/portfolio/execution 三类报告统一由 `report_intent` 直接映射到对应插件，
+经 `_run_plugin_enhanced` 完成产物校验 + 插件委托 + metadata 组装（不进入通用匹配）：
+
+| 优先级 | 触发条件 | 报告类型 | 生成插件 | 回答的问题 |
+|--------|---------|---------|---------|-----------|
+| 1 | `report_intent` ∈ {attribution/portfolio/execution} | 绩效归因/组合优化/执行监控 | `attribution_report` / `portfolio_report` / `execution_report` | 盈亏/组合/执行质量 |
+| 2 | 有 BACKTEST 产物 | 回测绩效报告 | `backtest_report`（`output_file: report.html`） | 策略理论上能赚钱吗？ |
+| 3 | 显式 `report_template` ∈ {technical/fundamental/both}（无 BACKTEST） | 模板化个股分析 | `technical_report` / `fundamental_report`，both 多命中 → `_run_plugin_many` 联合生成双份 | 个股技术/基本面 |
+| 4 | 其余插件 trigger 匹配（产物存在等） | 因子分析等 | `factor_analysis_report` 等 | 这只股票值得买吗？ |
+| 5 | 无任何插件命中 | 默认个股分析兜底 | `fallback_report`（fallback=true，委托 technical_report / fundamental_report 插件渲染） | 个股技术/基本面 |
+| 6 | 无插件机制 / 无兜底插件 / 匹配异常 | 默认个股分析兜底 | `_run_builtin_fallback` 直接运行 `fallback_report` 插件（若兜底插件也缺失则返回失败，不再有独立内置模板内核兜底） | 个股技术/基本面 |
+
+> **字段统一**：`report_intent` 与 `report_template` 均用于个股分析路由，二者在
+> `_detect_report_template` 内相互兼容（report_intent 作为旧字段回退）。`both`
+> 通过两个模板插件各自声明 `report_template=both` 触发条件，经 `find_by_trigger`
+> 同时命中后由 `_run_plugin_many` 联合生成技术+基本面两份报告，并统一注册门户、
+> 注入 LLM 解读、汇总 `report_data.json`。
+
+### 自包含插件架构
+
+7 份内置报告统一走**自包含插件**路径（`plugins/<id>/` 内含 render.py + 专属模板/辅助模块），render.py 仅依赖 `scripts.*` 公共库（含 `compute_report_data`），不依赖 `engine.py` 内部函数（含 fallback_report，已自包含，委托 technical_report / fundamental_report 插件渲染，无内置模板内核回调）。HTML 组装只在插件层发生，全项目仅一套「插件厨房」。
+
+| 插件 id | report_type | 内容 | 专属模块 |
+|--------|------------|------|---------|
+| `technical_report` | technical | 技术分析 | `technical_report.html.j2` |
+| `fundamental_report` | fundamental | 基本面分析 | `fundamental_report.html.j2` |
+| `attribution_report` | attribution | 绩效归因 | `attribution_llm.py`（LLM 解读） |
+| `portfolio_report` | portfolio | 组合优化 | `scripts.templates.portfolio_report` |
+| `execution_report` | execution | 执行监控 | `scripts.templates.execution_report` |
+| `backtest_report` | backtest | 回测绩效 | `backtest_helpers.py`（暴露计算） |
+| `factor_analysis_report` | factor_analysis | 因子分析汇总 | `factor_analysis_report.html.j2` |
+
+**公共库**（插件复用，不属任何单个插件）：`scripts/report_generator.py`（`ReportGenerator`，回测/归因共用）、`scripts/renderers`、`scripts/charts`、`scripts/templates`、`scripts/config.py`、`scripts/template_engine.py`（`compute_report_data` 供技术/基本面插件复用）。
+
+**report_type 兼容**：各插件 plugin.yaml 声明 `report_type` 字段，`_run_plugin` 返回兼容元数据（保持 attribution/portfolio/execution 等原值），不破坏门户与测试契约。
 
 ### 绩效复盘报告（新增）
 
@@ -176,7 +213,7 @@ reports-engine 是 A 股量化投研的**绩效归因与可视化报告引擎**�
 
 ```python
 from engine import run
-from context import Context
+from scripts.context import Context
 
 # 量化投资者
 ctx = Context(

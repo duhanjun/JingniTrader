@@ -5,6 +5,9 @@ icon: "⚖️"
 version: "1.0.0"
 enabled: true
 
+# 兼容的 report_type 元数据（与 reports-engine 内置 portfolio 路由返回一致）
+report_type: portfolio
+
 # 触发条件：明确请求组合优化报告时（report_intent=portfolio）
 trigger:
   - { field: report_intent, equals: portfolio }

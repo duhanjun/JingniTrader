@@ -16,6 +16,15 @@ import json
 from typing import Any, Dict
 
 
+def _mode_label(mode: str) -> str:
+    """将交易模式英文标识映射为中文展示标签。
+
+    paper → 模拟交易；live → 实盘交易；其他 → 原样大写兜底。
+    """
+    label_map = {"paper": "模拟交易", "live": "实盘交易"}
+    return label_map.get(str(mode).lower(), str(mode).upper())
+
+
 def build_polling_script(
     port: int,
     poll_interval: int = 5,
@@ -175,15 +184,16 @@ def build_live_status_html(
     参数:
         port: 状态服务端口
         poll_interval: 轮询间隔（秒）
-        mode: 交易模式
+        mode: 交易模式（paper/live）
         backend: 执行后端
     """
+    mode_label = _mode_label(mode)
     polling_script = build_polling_script(port, poll_interval)
     return f"""
 <div class="status-bar live" id="live-status-bar">
     <span class="status-lamp idle" id="status-lamp"></span>
     <span class="status-text">
-        <strong>{mode.upper()}</strong> · {backend}
+        <strong>{mode_label}</strong> · {backend}
         · <span id="status-message">连接中...</span>
         · 下次刷新 <span id="refresh-countdown">{poll_interval}s</span>
     </span>

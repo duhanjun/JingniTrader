@@ -5,10 +5,17 @@ icon: "📈"
 version: "1.0.0"
 enabled: true
 
-# 触发条件：仅当明确请求技术分析报告时（report_intent=technical）
-# 其余场景（fundamental/both/兜底）仍由内置 _run_template_report 处理，并行兼容。
+# 兼容的 report_type 元数据（与内置 technical 报告类型一致）
+report_type: technical
+
+# 触发条件：
+# - report_intent=technical（旧字段兼容）
+# - report_template=technical（显式模板请求，单意图）
+# - report_template=both（多命中聚合：与 fundamental_report 联合生成两份报告）
 trigger:
   - { field: report_intent, equals: technical }
+  - { field: report_template, equals: technical }
+  - { field: report_template, equals: both }
 
 # 所需产物：DATA 行情数据
 requires:

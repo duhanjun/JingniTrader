@@ -1,0 +1,44 @@
+{# 因子分析汇总报告插件模板 — 完整独立 HTML（与内置 _maybe_render_factor_analysis_report 输出一致，阶段 C 自包含） #}
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>因子分析报告</title>
+<style>
+  /* 统一页面布局 + 导航栏 + 底部版权栏（与其余报告一致） */
+  {{ page_css | safe }}
+  /* ── 因子分析报告特有样式 ── */
+  .factor-card { background: var(--card-bg); padding: 16px; border-radius: 8px; margin: 12px 0;
+                 border-left: 4px solid var(--jm-accent); box-shadow: var(--shadow); }
+  .factor-card h3 { margin: 0 0 8px 0; color: var(--jm-primary); }
+  .signal-warning { background: #fef3c7; color: #d97706; }
+  .metrics-row { display: flex; flex-wrap: wrap; gap: 16px; font-size: 14px; }
+  .metrics-row span { background: var(--bg); padding: 4px 8px; border-radius: 3px; }
+  .link-row { margin-top: 8px; font-size: 13px; }
+  .factor-link { color: var(--jm-secondary); text-decoration: none; font-weight: 500; }
+  .factor-link:hover { color: var(--jm-accent); text-decoration: underline; }
+</style>
+</head>
+<body>
+{{ nav_html | safe }}
+
+<div class="header">
+    <h1>因子分析报告</h1>
+    <p>生成时间: {{ generated_at }} | 任务 ID: {{ task_id }}</p>
+</div>
+
+<div class="section">
+    <h2>因子汇总</h2>
+    共分析 <b>{{ num_factors }}</b> 个因子。
+    ACCEPT 数量：{{ accept_count }}
+    ｜ REVIEW 数量：{{ review_count }}
+</div>
+
+{% for card in cards_html %}
+{{ card | safe }}
+{% endfor %}
+
+{{ footer_html | safe }}
+</body>
+</html>

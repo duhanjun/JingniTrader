@@ -32,6 +32,10 @@ class ReportPlugin:
                        {artifact: KEY}   —— 按阶段产物存在性触发
         requires:    所需产物（DATA/FACTOR/BACKTEST/PORTFOLIO/...），
                      生成前校验，缺任一则跳过
+        output_file: 自定义输出文件名（默认 {id}.html）。回测报告声明
+                     report.html 以兼容下游缓存/门户/归档约定，无需复制改名。
+        fallback:    是否为兜底插件（无任何插件命中时承担默认报告）。
+                     仅允许一个（多个时取 portal.display_order 最小者）。
         data_contract: 输入数据契约（strict + 各产物字段约束），暂为文档/校验参考
         portal:      门户元信息 {enabled, display_order, ...}
         render:      渲染函数（由 loader 从 render.py 注入）
@@ -43,8 +47,11 @@ class ReportPlugin:
     icon: str = "📄"
     version: str = "1.0.0"
     enabled: bool = True
+    report_type: str = ""  # 兼容的 report_type 元数据（默认取 id；内置报告迁移后保持原值）
     triggers: List[Dict[str, Any]] = field(default_factory=list)
     requires: List[str] = field(default_factory=list)
+    output_file: str = ""  # 自定义输出文件名；缺省沿用 {id}.html
+    fallback: bool = False  # 是否为兜底插件
     data_contract: Dict[str, Any] = field(default_factory=dict)
     portal: Dict[str, Any] = field(default_factory=lambda: {"enabled": True, "display_order": 99})
     render: Optional[RenderFunc] = None
@@ -145,6 +152,22 @@ def find_by_trigger(ctx) -> List[ReportPlugin]:
     matched = [p for p in REGISTRY.values() if p.matches(ctx)]
     matched.sort(key=lambda p: p.portal.get("display_order", 99))
     return matched
+
+
+def find_fallback() -> Optional[ReportPlugin]:
+    """返回启用的兜底插件。
+
+    兜底插件声明 ``fallback: true`` 且无显式 trigger（仅作兜底语义）。
+    多个兜底插件并存时取 portal.display_order 最小者（文档约定仅声明一个）。
+    """
+    candidates = [
+        p for p in REGISTRY.values()
+        if p.enabled and p.fallback and not p.triggers
+    ]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda p: p.portal.get("display_order", 99))
+    return candidates[0]
 
 
 # 延迟 import os（避免循环依赖）

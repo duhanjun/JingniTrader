@@ -1,14 +1,17 @@
-# 因子分析报告 — 内置报告插件化注册
-# 因子分析报告由 _maybe_render_factor_analysis_report 生成，作为个股分析流程的
-# 附加产物（非独立路由）。本插件仅注册到插件框架（统一管理），默认不拦截内置路由。
+# 因子分析报告 — 自包含插件（阶段 C）
 id: factor_analysis_report
 label: 因子分析
 icon: "🧬"
 version: "1.0.0"
 enabled: true
 
-# 触发条件留空：仅注册不触发（由个股分析流程附带生成）
-trigger: []
+# 兼容的 report_type 元数据（与内置 factor_analysis 产物一致）
+report_type: factor_analysis
+
+# 触发条件：存在 FACTOR 产物（因子分析报告作为个股分析流程附加产物生成）
+# 与 plugins/registry.py::_match_rule 的 artifact 触发契约对齐（{artifact: KEY}）。
+trigger:
+  - artifact: FACTOR
 
 # 所需产物：因子数据
 requires:
