@@ -195,7 +195,16 @@ class TestAnalysisPathE2E:
             assert os.path.isfile(qg_path), "quality_gate.py 应存在"
             spec = ilu.spec_from_file_location("_qg_check", qg_path)
             qg_mod = ilu.module_from_spec(spec)
-            spec.loader.exec_module(qg_mod)
+            # 必须先登记到 sys.modules 再 exec_module。
+            # quality_gate.py 使用 from __future__ import annotations，注解为字符串；
+            # dataclasses 在解析时需要 sys.modules[cls.__module__] 可取回该模块。
+            # 未登记 → Py3.13 下抛 AttributeError: 'NoneType' object has no attribute
+            # '__dict__'（stdlib dataclasses.py:757 解析字符串注解分支）。
+            sys.modules["_qg_check"] = qg_mod
+            try:
+                spec.loader.exec_module(qg_mod)
+            finally:
+                sys.modules.pop("_qg_check", None)
             assert hasattr(qg_mod, "DataQualityGate"), "DataQualityGate 类应存在"
             pytest.skip("external_data 路径下质量门未触发，P0-2 实现已验证存在")
 
@@ -638,7 +647,14 @@ class TestP02DataQualityGateE2E:
         spec = ilu.spec_from_file_location(
             "_qg_test", os.path.join(DE_SCRIPTS, "quality_gate.py"))
         qg_mod = ilu.module_from_spec(spec)
-        spec.loader.exec_module(qg_mod)
+        # 先登记再 exec：quality_gate.py 有 from __future__ import annotations，
+        # dataclasses 解析字符串注解需 sys.modules[cls.__module__] 可取回模块，
+        # 否则 Py3.13 抛 AttributeError（stdlib dataclasses.py:757）。详见文件内注释。
+        sys.modules["_qg_test"] = qg_mod
+        try:
+            spec.loader.exec_module(qg_mod)
+        finally:
+            sys.modules.pop("_qg_test", None)
 
         assert hasattr(qg_mod, "DataQualityGate"), "quality_gate.py 应导出 DataQualityGate"
 
@@ -652,7 +668,12 @@ class TestP02DataQualityGateE2E:
         spec = ilu.spec_from_file_location(
             "_qg_test", os.path.join(DE_SCRIPTS, "quality_gate.py"))
         qg_mod = ilu.module_from_spec(spec)
-        spec.loader.exec_module(qg_mod)
+        # 同 test_quality_gate_class_exists：先登记 sys.modules 再 exec。
+        sys.modules["_qg_test"] = qg_mod
+        try:
+            spec.loader.exec_module(qg_mod)
+        finally:
+            sys.modules.pop("_qg_test", None)
 
         gate = qg_mod.DataQualityGate()
 

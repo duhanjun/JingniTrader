@@ -201,6 +201,18 @@ class ModelEngine:
             train_idx = dates[dates.isin(train_dates)].index.values
             val_idx = dates[dates.isin(val_dates)].index.values
 
+            # F-2 防御：确保切分索引在 [0, len(dates)) 合法范围，避免下游 iloc 越界。
+            # 背景：train_idx/val_idx 是 dates 的「索引标签值」，下游 objective() 却用
+            # X.iloc[train_idx] 按「位置」取行。当 dates 索引非 0..n-1 连续整数
+            # （如筛选后残留的原始索引、或 DatetimeIndex）时，标签值会超出 iloc 位置
+            # 上界，抛 IndexError: positional indexers are out-of-bounds，
+            # 导致 MODEL 阶段整体失败。此防御自 A 树同步（M 树此前缺失该段）。
+            train_idx = np.asarray(train_idx)
+            val_idx = np.asarray(val_idx)
+            n_dates_total = len(dates)
+            train_idx = train_idx[(train_idx >= 0) & (train_idx < n_dates_total)]
+            val_idx = val_idx[(val_idx >= 0) & (val_idx < n_dates_total)]
+
             if len(train_idx) > 0 and len(val_idx) > 0:
                 splits.append((train_idx, val_idx))
 

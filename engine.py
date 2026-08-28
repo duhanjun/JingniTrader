@@ -135,9 +135,9 @@ ATTRIBUTION_KEYWORDS = {
 
 # ── 数据源优先级意图解析（方案 D：用户对话切换数据源）──────────────
 # 用户可通过自然语言指定数据源优先级，例如：
-#   "用 wind 取数据"              → ctx.data_sources = ["wind", "tushare", "baostock", "akshare", "websearch"]
-#   "优先用 ifind，失败用 tushare" → ctx.data_sources = ["ifind", "tushare", "baostock", "akshare", "websearch"]
-#   "用 baostock 作为首选源"       → ctx.data_sources = ["baostock", "tushare", "akshare", "websearch"]
+#   "用 wind 取数据"              → ctx.data_sources = ["wind", "local", "westock", "baostock", "akshare", "websearch"]
+#   "优先用 ifind，失败用 tushare" → ctx.data_sources = ["ifind", "tushare", "local", "westock", "baostock", "akshare", "websearch"]
+#   "用 baostock 作为首选源"       → ctx.data_sources = ["baostock", "local", "westock", "akshare", "websearch"]
 # 未匹配到数据源优先级意图时，ctx.data_sources 保持 None，由 data-engine 走环境变量/默认值。
 #
 # 触发关键词（必须同时命中"指定动作"和"数据源名称"才算明确意图，避免误触发）：
@@ -162,8 +162,11 @@ DATA_SOURCE_NAMES = {
 }
 
 # 默认免费降级链（用户只指定首选源时，自动追加在后面作为兜底）
-# 仅含真正免费、无需 token/账号的源；tushare/wind/ifind 等 opt-in 源不在此列
-_DEFAULT_FALLBACK_CHAIN = ["baostock", "akshare", "websearch"]
+# REQ-2026-08-14 拍板：免费链 5 源 = local,westock,baostock,akshare,websearch
+# （local 本地缓存优先级高于 westock）。按需调用组（tushare/wind/ifind 等）不进此链。
+# 与 data-engine 默认链（config.py DEFAULT_DATA_SOURCES / DATA_BACKENDS 环境变量）
+# 保持一致 —— 两者必须同步修改，否则意图补全的兜底源会与 data-engine 实际可用源脱节。
+_DEFAULT_FALLBACK_CHAIN = ["local", "westock", "baostock", "akshare", "websearch"]
 
 
 # ── 个股代码/名称提取（方案 E：个股分析场景）────────────────────────
@@ -358,10 +361,10 @@ class MasterEngine:
             3. 数据源名称如：tushare/baostock/akshare/wind/ifind/万得/同花顺/掘金/通达信/迅投
 
         示例：
-            "用 wind 取数据"        → ["wind", "tushare", "baostock", "akshare", "websearch"]
-            "优先用 ifind，失败用 tushare" → ["ifind", "tushare", "baostock", "akshare", "websearch"]
-            "用 baostock 作为首选源" → ["baostock", "tushare", "akshare", "websearch"]
-            "用 baostock 和 akshare" → ["baostock", "akshare", "tushare", "websearch"]
+            "用 wind 取数据"        → ["wind", "local", "westock", "baostock", "akshare", "websearch"]
+            "优先用 ifind，失败用 tushare" → ["ifind", "tushare", "local", "westock", "baostock", "akshare", "websearch"]
+            "用 baostock 作为首选源" → ["baostock", "local", "westock", "akshare", "websearch"]
+            "用 baostock 和 akshare" → ["baostock", "akshare", "local", "westock", "websearch"]
             "今天天气真好"          → None
             "用 momentum 因子做回测" → None（"用"是动词但未跟数据源名）
         """
@@ -398,7 +401,7 @@ class MasterEngine:
                 user_chain.append(src)
 
         # 3) 用户只指定了部分源 → 自动追加默认免费降级链作为兜底
-        #    例如用户只说"用 wind"，自动补 tushare→baostock→akshare→websearch
+        #    例如用户只说"用 wind"，自动补 local→westock→baostock→akshare→websearch
         for src in _DEFAULT_FALLBACK_CHAIN:
             if src not in user_chain:
                 user_chain.append(src)

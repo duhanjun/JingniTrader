@@ -135,12 +135,17 @@ jobs:
           set -o pipefail
           echo "===== heavy batch: ${{ matrix.batch }} ====="
           # -p no:randomly：禁用随机顺序，保证原生库加载顺序确定
-          # --timeout=120 --timeout-method=thread：单用例超时护栏
           # -x 不启用：允许同批次内多用例失败一次暴露全貌
+          # 超时容差（2026-08-28 调）：此处显式覆盖 pytest.ini 的全局 timeout=120。
+          # 该 120s 是给默认安全子集的「防挂起」护栏，对 heavy 批次并不适用 ——
+          # 实测最慢正当用例 117s（skill_pairs）、7 阶段管线 211s，已顶到 120s 边界，
+          # 单机负载波动即可越界，此前正是因此出现「单跑通过、合批超时失败」的假阳性。
+          # CI runner（4 vCPU）慢于本地（12 核），取 600s 留出约 5x 余量；
+          # 600s 仍足以拦住真挂起（正常路径无用例接近该量级）。
           pytest "${{ matrix.batch }}" \
             -m "heavy and not requires_network" \
             -p no:randomly \
-            --timeout=120 --timeout-method=thread \
+            --timeout=600 --timeout-method=thread \
             -q -ra || echo "BATCH_FAILED=1" >> "$GITHUB_ENV"
           echo "批次 ${{ matrix.batch }} 执行结束"
 
