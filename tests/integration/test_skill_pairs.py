@@ -119,6 +119,19 @@ def _run_pipeline_prefix(stages: list[str], monkeypatch, tmp_path):
         if _k == "scripts" or _k.startswith("scripts.") or _k == "engine":
             sys.modules.pop(_k, None)
 
+    # (2b) 必须一并清理已缓存的「子 skill 模块」（skills.<name>.engine 等）。
+    # 这些模块在 import 期就把各自 scripts/config.py 的环境变量固化成模块级常量 ——
+    # 典型如 execution-monitor-engine 的 EXECUTION_DIR / AUDIT_LOG_PATH。
+    # 若不清：先跑的 test_full_7stage_pipeline（只设 QUANT_WORK_DIR、不设
+    # EXECUTION_DIR）会把 EXECUTION_DIR 绑定到它自己的 tmp 目录并留在
+    # sys.modules['skills.execution-monitor-engine.engine'] 里；本文件后续
+    # monkeypatch.setenv("EXECUTION_DIR", ...) 只改了 os.environ，已导入模块
+    # 仍指向旧路径 → 产物写到上一个测试的 tmp 目录，断言「EXECUTION 产物缺失」
+    # 失败。表现为「单跑通过、合批失败」的跨文件污染。
+    for _k in list(sys.modules.keys()):
+        if _k == "skills" or _k.startswith("skills."):
+            sys.modules.pop(_k, None)
+
     # (3) 用 importlib.util 显式重新注册主 scripts 包
     scripts_dir = os.path.join(ROOT, "scripts")
     init_py = os.path.join(scripts_dir, "__init__.py")
