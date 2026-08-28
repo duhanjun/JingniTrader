@@ -21,7 +21,7 @@
 | **live 模式风控** | **已接入（一期）**：xtquant / gm 两个实盘适配器的 `send_order` 在下单前调用 `BaseExecutor._live_risk_guard`，执行**下单频率 + 单笔金额占比**两项检查；超限拒单且不触达券商下单接口。 | `scripts/base/base_executor.py::_live_risk_guard`；adapters/{xtquant,gm}_adapter.py |
 | **live 未覆盖项** | **单日亏损检查（二期）**。broker 返回的账户 dict 无 `start_of_day_nav`，无法计算当日盈亏，故 live 路径暂不检查该项；需引擎侧持久化每日起始净值后补齐。 | `scripts/base/circuit_breaker.py::check_live_order` |
 | **live 风控失效模式** | **fail-closed**：`query_account()` 取不到总资产（空/0/抛异常）时一律拒单，绝不 fail-open。 | `scripts/base/base_executor.py::_live_risk_guard` |
-| 风控阈值 | ⚠️ **存在入口依赖**：`skills/execution-monitor-engine/scripts/config.py` 与根 `scripts/config.py` 两套默认值不同（单笔比例相差 5 倍）。引用阈值时必须声明入口 | 两份 config.py |
+| 风控阈值 | ⚠️ **存在入口依赖（2026-08-28 实测复核，卡片仍有效）**：`skills/execution-monitor-engine/scripts/config.py`（`MAX_SINGLE_ORDER_RATIO=0.10`、`MAX_DAILY_LOSS_RATIO=0.02`、`MAX_ORDER_FREQUENCY=2`）与根 `scripts/config.py`（`0.02` / `0.03` / `5`）两套默认值不同，**单笔比例实测相差 5.0 倍**（0.10 ÷ 0.02）。引用阈值时必须声明入口。<br>**但需明确**：根 `scripts/config.py` 的这三项 `MAX_*` 当前**无消费方**（全仓检索仅 `skills/execution-monitor-engine/scripts/base/circuit_breaker.py` 导入，而该 import 解析到 execution-monitor-engine 自己的 config），属**死配置**——读错不会改变实际风控行为，但会误导风险评估与对外口径。实际生效阈值为 execution-monitor-engine 那一套 | `skills/execution-monitor-engine/scripts/config.py`、`scripts/config.py` |
 | 频率单位 | **笔/秒**（`_check_frequency` 窗口 `now - t < 1.0` 秒），非「笔/分钟」 | `skills/execution-monitor-engine/engine.py` |
 | 连接失败行为 | xtquant 连接失败直接报错退出；**gm 连接失败自动降级为 paper**，此时不会真实下单 | `engine.py` `run()` / `run_live()` |
 | 监控入口是否下单 | `scripts/run_live_xtquant.py` 只做账户/持仓/成交的实时监控与刷新，**不下单** | 该脚本调用 `run_live()` |
