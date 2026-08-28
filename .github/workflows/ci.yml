@@ -95,15 +95,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # heavy 用例实测集中于这 3 个目录（OPEN-2026-0814-13 遗留）：
-        #   integration/ 7 个文件、master/ 4 个、factor_engine/ 1 个
+        # heavy 用例实测集中于这 4 个目录（OPEN-2026-0814-13 遗留）：
+        #   integration/ 7 个文件、master/ 4 个、factor_engine/ 1 个、
+        #   portfolio_risk_engine/ 2 个（test_circuit_breaker / test_run_contract）
         # 按目录拆成独立 job，每个 job 内 -p no:randomly 单进程串行执行，
         # 使 cvxpy/lightgbm/gm 等原生扩展不共进程，消除线程竞态导致的
-        # access violation / 段错误。任一目录失败不影响其余目录结果。
+        # access violation / 段错误。fail-fast: false，任一目录失败不影响其余目录结果。
+        # 注意：portfolio_risk_engine 此前漏配，导致该目录 heavy 用例在 CI 上无执行批次，
+        #       本地默认子集与 CI 快速回归又均排除 heavy —— 形成覆盖盲区（2026-08-28 补入）。
         batch:
           - tests/integration
           - tests/master
           - tests/factor_engine
+          - tests/portfolio_risk_engine
     steps:
       - uses: actions/checkout@v4
 
@@ -122,32 +126,40 @@ jobs:
         run: pip install pytest-xdist
 
       - name: 重型计算测试 — ${{ matrix.batch }}（单进程串行，进程级隔离）
+        id: heavy
         env:
           # 单线程 BLAS/OpenMP：抑制原生栈多线程竞态
           OMP_NUM_THREADS: '1'
           OPENBLAS_NUM_THREADS: '1'
           MKL_NUM_THREADS: '1'
         run: |
+          set -e
           set -o pipefail
           echo "===== heavy batch: ${{ matrix.batch }} ====="
           # -p no:randomly：禁用随机顺序，保证原生库加载顺序确定
           # --timeout=120 --timeout-method=thread：单用例超时护栏
           # -x 不启用：允许同批次内多用例失败一次暴露全貌
+          # 阻断模式（2026-08-28 改，Damon 批准方案 A）：set -e 生效，
+          # pytest 非零退出直接终止本 step 并使本 job 失败，不再 continue-on-error。
           pytest "${{ matrix.batch }}" \
             -m "heavy and not requires_network" \
             -p no:randomly \
             --timeout=120 --timeout-method=thread \
-            -q -ra || echo "BATCH_FAILED=1" >> "$GITHUB_ENV"
+            -q -ra
           echo "批次 ${{ matrix.batch }} 执行结束"
 
-      - name: 汇总批次结论（失败不阻断主流水线，仅作长期稳定性观测）
+      # 阻断模式（2026-08-28 改，Damon 批准方案 A）：上一步 pytest 非零退出 →
+      # set -e 直接终止 step → 本 job 失败，不再 continue-on-error 观测。
+      # 注：此处用 steps.heavy.outcome（同一 job 内已执行 step 的真实结果），
+      #     不可用 ${{ job.status }} —— 后者在 step 进入前即完成插值，恒为 success。
+      - name: 汇总批次结论（阻断模式：失败即 job 失败）
         if: always()
         run: |
-          if [ "${BATCH_FAILED:-0}" = "1" ]; then
-            echo "::warning::heavy 批次 ${{ matrix.batch }} 存在失败用例（观测模式，不阻断流水线）"
-          else
-            echo "heavy 批次 ${{ matrix.batch }} 全部通过"
+          if [ "${{ steps.heavy.outcome }}" != "success" ]; then
+            echo "::error::heavy 批次 ${{ matrix.batch }} 存在失败用例（阻断模式，已使本 job 失败）"
+            exit 1
           fi
+          echo "heavy 批次 ${{ matrix.batch }} 全部通过"
 
   # 三方一致性校验：主目录 ↔ 仓库副本 ↔ GitHub（OPEN-2026-0827-12）
   # 副本为单一权威源（OPEN-2026-0827-05），此 job 在 CI 侧校验受保护资产
