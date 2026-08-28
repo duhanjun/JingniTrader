@@ -25,4 +25,27 @@ XTQUANT_ACCOUNT = os.environ.get("XTQUANT_ACCOUNT", "")  # miniQMT 资金账号
 GM_TOKEN = os.environ.get("GM_TOKEN", "")  # 掘金量化 token
 GM_ACCOUNT_ID = os.environ.get("GM_ACCOUNT_ID", "")  # 掘金账户ID(终端获取)
 
+# ── live 单日亏损检查（二期，2026-08-28 Damon 批准，自 A 树同步）────────
+# 背景：broker 账户接口均不提供 start_of_day_nav——xtquant 的 XtAsset 仅 6 字段
+# （已全量枚举）、gm 的 Cashes.data 29 字段中 fpnl 口径未源证（[UNSOURCED]），
+# 故改由本地文件按交易日持久化基线。默认 **off** 灰度开启：启用前须确认基线
+# 来源（见 references/compliance-trading-mode.md「冷启动漏损」说明）。
+DEFAULT_LIVE_DAILY_LOSS_CHECK = "off"
+_TRUTHY = ("1", "on", "true", "yes")
+
+LIVE_DAILY_BASELINE_PATH = os.environ.get(
+    "LIVE_DAILY_BASELINE_PATH", os.path.join(EXECUTION_DIR, "live_daily_baseline.json")
+)
+
+
+def live_daily_loss_enabled() -> bool:
+    """实时判定 live 单日亏损检查是否开启（**不做构造期快照**）。
+
+    刻意每次调用都现读环境变量：① 运行期可能由运维/风控官切换开关，构造期
+    快照会让切换失效；② 缓存会让 ``monkeypatch.setenv`` 失效，测试将无从
+    覆盖开启态。
+    """
+    return os.environ.get("LIVE_DAILY_LOSS_CHECK", DEFAULT_LIVE_DAILY_LOSS_CHECK).strip().lower() in _TRUTHY
+
+
 os.makedirs(EXECUTION_DIR, exist_ok=True)

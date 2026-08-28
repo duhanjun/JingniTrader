@@ -8,7 +8,9 @@ from abc import ABC, abstractmethod
 from typing import Dict, List, Optional, Any
 import pandas as pd
 
-from .circuit_breaker import CircuitBreaker
+from .circuit_breaker import UNAVAILABLE_SOD, CircuitBreaker
+from .daily_baseline import resolve_start_of_day_nav
+from .. import config
 
 
 class BaseExecutor(ABC):
@@ -50,14 +52,21 @@ class BaseExecutor(ABC):
             order_value = float(price or 0.0) * int(volume or 0)
 
         current_nav = 0.0
+        account_id = ""
         try:
             account = self.query_account()
             if isinstance(account, dict):
                 current_nav = float(account.get("total_assets") or 0.0)
+                account_id = str(account.get("account_id") or "")
         except Exception as exc:  # noqa: BLE001 查询失败不得放行，按 nav=0 处理
             self._logger.warning(f"live 风控检查前查询账户失败，按拒单处理: {exc}")
 
-        check = self.circuit_breaker.check_live_order(current_nav=current_nav, order_value=order_value, code=code)
+        check = self.circuit_breaker.check_live_order(
+            current_nav=current_nav,
+            order_value=order_value,
+            code=code,
+            start_of_day_nav=self._resolve_live_sod(current_nav, account_id),
+        )
         if not check["allowed"]:
             return {
                 "success": False,
@@ -66,6 +75,38 @@ class BaseExecutor(ABC):
                 "rejected_by": "circuit_breaker",
             }
         return None
+
+    # ------------------------------------------------------------------
+    # live 单日亏损：日初净值基线（二期，2026-08-28，自 A 树同步）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _resolve_live_sod(current_nav, account_id):
+        """解析 live 单日亏损检查所需的日初净值，返回三态之一。
+
+        - 开关 ``LIVE_DAILY_LOSS_CHECK`` 关闭（默认）→ 返回 ``None``（不检查，
+          行为与一期完全一致，灰度期不引入任何行为变化）；
+        - 开关开启且基线可用 → 返回正数（正常检查）；
+        - 开关开启但基线取不到（净值非正 / 基线文件写入失败）→ 返回
+          ``UNAVAILABLE_SOD`` 哨兵，由 ``_check`` 判拒单（fail-closed）。
+
+        基线来源为本地按交易日持久化的快照（broker 均不提供日初净值字段），
+        详见 ``scripts/base/daily_baseline.py`` 模块说明与其声明的冷启动残余缺陷。
+        """
+        # 经 config 模块实时取（而非构造期导入快照）：运行期运维切换开关、
+        # 测试 monkeypatch 才能生效。
+        if not config.live_daily_loss_enabled():
+            return None
+        sod, source = resolve_start_of_day_nav(config.LIVE_DAILY_BASELINE_PATH, account_id, current_nav)
+        if sod is None:
+            logging.getLogger("daily-baseline").warning(
+                f"live 单日亏损基线不可用（account_id={account_id!r}），本次下单按拒单处理"
+            )
+            return UNAVAILABLE_SOD
+        logging.getLogger("daily-baseline").info(
+            f"live 单日亏损基线: account_id={account_id!r} sod={sod:.2f} source={source}"
+        )
+        return sod
 
     @abstractmethod
     def query_account(self) -> Dict[str, Any]:

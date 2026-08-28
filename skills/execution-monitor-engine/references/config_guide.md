@@ -38,6 +38,19 @@
 | MAX_SINGLE_STOCK_WEIGHT | 单票最大持仓比例 | 0.10 (10%) |
 | MAX_ORDER_FREQUENCY | 每秒最大下单笔数 | 2 |
 
+### live 单日亏损检查（二期，2026-08-28）
+
+| 变量名 | 描述 | 默认值 |
+|--------|------|--------|
+| LIVE_DAILY_LOSS_CHECK | live 单日亏损检查开关（`1`/`on`/`true`/`yes` 开启） | off |
+| LIVE_DAILY_BASELINE_PATH | 日初净值基线文件落盘路径 | `{EXECUTION_DIR}/live_daily_baseline.json` |
+
+说明：broker 账户接口均不提供 `start_of_day_nav`，故 live 侧的日初净值由本地基线文件
+按交易日持久化供数（同日复用、跨日重置、按 `account_id` 分键）。**默认关闭**——启用前
+须确认基线来源可接受「日内冷启动漏损」（引擎于交易时段内冷启动时，基线取启动时刻净值，
+开盘至启动之间已实现亏损不纳入计算）。开启后若基线不可用则拒单（fail-closed）。
+详见 `references/compliance-trading-mode.md`。
+
 ### 费用配置（paper 模式）
 
 | 变量名 | 描述 | 默认值 |

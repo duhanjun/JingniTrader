@@ -118,6 +118,17 @@ execution-monitor-engine 是 A 股量化投研的**实盘执行与监控引擎**
 - **单笔金额上限**：不超过净资产 10%
 - **订单频率**：每秒最多 2 笔
 
+paper 与 live 共用同一份 `CircuitBreaker` 实现，但**live 侧的单日亏损检查默认关闭**：
+broker 账户接口不提供 `start_of_day_nav`，改由本地基线文件按交易日持久化供数，
+受「日内冷启动漏损」限制（详见 `references/compliance-trading-mode.md`）。
+
+| 开关 | 默认值 | 作用 |
+|------|--------|------|
+| `LIVE_DAILY_LOSS_CHECK` | `off` | 置 `1`/`on`/`true`/`yes` 开启 live 单日亏损检查 |
+| `LIVE_DAILY_BASELINE_PATH` | `{EXECUTION_DIR}/live_daily_baseline.json` | 日初净值基线落盘路径 |
+
+开启后若基线不可用（总资产非正 / 基线写入失败），**拒单**而非跳过检查。
+
 ## 量化断路器
 
 `optimizations/quant_circuit_breaker.py` 提供增强版量化断路器（可选独立组件，未被 PaperExecutor 默认集成）：

@@ -233,6 +233,104 @@ class TestPaperExecutorEnhanced:
         # T+1 字段应被补齐
         assert "available_volume" in executor2.account.positions["600000.SH"]
 
+    def test_sod_nav_survives_state_roundtrip(self, exec_modules, tmp_path, monkeypatch):
+        """日初净值须随账户状态跨重启持久化（2026-08-28 修复的漏存缺陷）。
+
+        背景：``save_state`` 此前只写 nav/available_cash/positions，而
+        ``Account.to_dict()`` 本就导出 ``start_of_day_nav``——该字段被丢掉，
+        导致重启后基线回落 INIT_CAPITAL，当日已实现亏损被"洗白"。
+
+        ⚠️ 刻意用 **63 万**（历史已亏 37%）而非 100 万：若用 100 万，则 sod 与
+        INIT_CAPITAL 数值相同，断言在"不存也不读"的坏实现下**依然通过**，护栏空洞。
+
+        本用例只验证 ``account_state.json`` 分支——直接调 ``load_state()``，
+        绕开 ``__init__`` 的 ledger 重建（ledger 分支由另一用例覆盖）。
+        """
+        engine = exec_modules["engine"]
+        state_path = str(tmp_path / "state.json")
+        monkeypatch.setattr(engine, "ACCOUNT_STATE_PATH", state_path)
+
+        executor = engine.PaperExecutor(init_capital=1_000_000)
+        executor.account.start_of_day_nav = 630_000.0  # 历史净值，区别于 INIT_CAPITAL
+        executor.account.nav = 630_000.0
+        executor.account.available_cash = 630_000.0
+        executor.save_state()
+
+        with open(state_path, encoding="utf-8") as f:
+            on_disk = json.load(f)
+        assert on_disk["start_of_day_nav"] == 630_000.0, "save_state 必须落盘日初净值"
+
+        executor2 = engine.PaperExecutor(init_capital=1_000_000)
+        assert executor2.load_state() is True
+        assert executor2.account.start_of_day_nav == 630_000.0
+
+        # 端到端语义：基线已恢复 → 当日再跌 5% 应被拦截（阈值 2%）
+        executor2.account.nav = 600_000.0
+        executor2.account.available_cash = 600_000.0
+        result = executor2.send_order(code="600000.SH", side="buy", volume=100, price=10.0)
+        assert result["success"] is False
+        assert "单日亏损" in result["error"]
+
+    def test_legacy_state_without_sod_falls_back_to_nav(self, exec_modules, tmp_path, monkeypatch):
+        """旧状态文件无 start_of_day_nav 键时，退化为当前 nav 而非 INIT_CAPITAL。
+
+        用 INIT_CAPITAL 兜底会在账户已盈亏时凭空造出错误基线（100 万 vs 实际
+        63 万），使单日亏损检查瞬时失效——故退化为 nav（保守：当日盈亏记为 0）。
+
+        ⚠️ **必须预置一个空 ledger.jsonl**：否则 ``__init__`` 的
+        ``migrate_legacy_state`` 会把 account_state.json 迁移成 ledger，令
+        ``_ledger_restored=True`` → ``load_state()`` 直接 return True **跳过**
+        读取分支，本用例就测了个寂寞（该坑在变异测试中暴露：撤销本修复后
+        用例仍全绿）。空 ledger 令迁移跳过、replay 无成交，从而真正命中
+        ``account_state.json`` 分支。
+        """
+        engine = exec_modules["engine"]
+        state_path = tmp_path / "state.json"
+        state_path.write_text(
+            json.dumps({"nav": 630_000.0, "available_cash": 630_000.0, "positions": {}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(engine, "ACCOUNT_STATE_PATH", str(state_path))
+        monkeypatch.setenv("EXECUTION_DIR", str(tmp_path / "exec"))
+        (tmp_path / "exec").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "exec" / "ledger.jsonl").write_text("", encoding="utf-8")  # 空 ledger：不走迁移
+
+        executor = engine.PaperExecutor(init_capital=1_000_000)
+        assert getattr(executor, "_ledger_restored", False) is False, "本用例须走 account_state.json 分支"
+        assert executor.load_state() is True
+        assert executor.account.start_of_day_nav == 630_000.0
+
+    def test_ledger_restore_recovers_sod_not_init_capital(self, exec_modules, tmp_path, monkeypatch):
+        """P1-1 ledger 重建路径必须恢复日初净值（2026-08-28 实测缺陷）。
+
+        ledger 是 source of truth 且**优先于** account_state.json（``_ledger_restored``
+        为真时 load_state 直接跳过），故只修 save_state 不够：重启后 nav=63 万而
+        sod 仍为 INIT_CAPITAL=100 万 → 当日盈亏被凭空算成 -37%，**账户永久误杀、
+        无法交易**。基线须随 ledger 重建一并落地。
+        """
+        engine = exec_modules["engine"]
+        monkeypatch.setenv("PAPER_LEDGER_PATH", str(tmp_path / "ledger.jsonl"))
+        monkeypatch.setenv("EXECUTION_DIR", str(tmp_path / "exec"))
+
+        # 会话一：账户已历史亏损至 63 万，成交一笔（写入 ledger）
+        executor = engine.PaperExecutor(init_capital=1_000_000)
+        executor.account.start_of_day_nav = 630_000.0
+        executor.account.nav = 630_000.0
+        executor.account.available_cash = 630_000.0
+        ok = executor.send_order(code="600000.SH", side="buy", volume=100, price=10.0)
+        assert ok["success"] is True, f"前置成交应成功: {ok}"
+
+        # 会话二：模拟重启（__init__ 内 _restore_from_ledger 自动触发）
+        restarted = engine.PaperExecutor(init_capital=1_000_000)
+        assert getattr(restarted, "_ledger_restored", False) is True, "本用例须走 ledger 重建路径"
+        assert restarted.account.nav == pytest.approx(630_000.0, rel=1e-3)
+        assert restarted.account.start_of_day_nav != 1_000_000.0, "sod 不得回落 INIT_CAPITAL"
+        assert restarted.account.start_of_day_nav == pytest.approx(restarted.account.nav, rel=1e-3)
+
+        # 端到端：重启后不应被当日亏损检查误杀（当日盈亏记为 0）
+        result = restarted.send_order(code="600001.SH", side="buy", volume=100, price=10.0)
+        assert result["success"] is True, f"重启后不应被误杀: {result}"
+
 
 # ============================================================================
 # 2. XtQuantExecutor mock 测试

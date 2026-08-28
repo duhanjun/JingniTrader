@@ -195,6 +195,11 @@ class PaperExecutor(BaseExecutor):
             # 有历史记录，用重建结果覆盖 account
             self.account.available_cash = snapshot.cash
             self.account.nav = snapshot.nav
+            # P1-1 下 ledger 是 source of truth 且**优先于** account_state.json
+            # （load_state 见 _ledger_restored 即跳过），故日初净值必须在此一并
+            # 恢复：否则重启后 nav=70 万而 sod 仍为 INIT_CAPITAL=100 万，当日盈亏
+            # 被凭空算成 -30%，单日亏损检查永久误杀、账户无法交易（2026-08-28 实测）。
+            self.account.start_of_day_nav = self._resolve_sod_on_restore(snapshot)
             # PositionState → account.positions dict
             self.account.positions = {
                 code: {
@@ -207,10 +212,31 @@ class PaperExecutor(BaseExecutor):
             self._ledger_restored = True
             logger.info(
                 f"P1-1 已从 ledger 重建状态: nav={snapshot.nav}, "
-                f"持仓标的数={len(snapshot.positions)}"
+                f"sod={self.account.start_of_day_nav}, 持仓标的数={len(snapshot.positions)}"
             )
         else:
             self._ledger_restored = False
+
+    def _resolve_sod_on_restore(self, snapshot):
+        """从 ledger 快照推导重启后的日初净值基线。
+
+        优先级：
+        1. **上次成交在往日** → 直接取 ``snapshot.nav``（= 上一交易日收盘净值），
+           这正是严格意义上的"日初净值"，无信息损失；
+        2. **同日已有成交** → 同样取 ``snapshot.nav``，但属降级：ledger 未记录
+           "成交前净值"，当日已实现亏损不纳入计算（与二期 live 侧"日内冷启动
+           漏损"同源，已文档化）。
+
+        绝不返回 ``INIT_CAPITAL``——历史盈亏会让它与真实净值脱节，直接导致
+        单日亏损检查误杀或失效。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        if snapshot.last_trade_date == today:
+            logger.warning(
+                "P1-1 ledger 含当日成交，日初净值降级取当前净值"
+                "（ledger 未记录成交前净值，当日已实现亏损不纳入单日亏损计算）"
+            )
+        return float(snapshot.nav)
 
     def _append_trade_record(
         self,
@@ -370,10 +396,18 @@ class PaperExecutor(BaseExecutor):
         return orders_to_execute
 
     def save_state(self):
-        """持久化账户状态"""
+        """持久化账户状态。
+
+        ⚠️ ``start_of_day_nav`` 必须一并落盘（2026-08-28 修复，自 A 树同步）：
+        此前只写 nav/available_cash/positions，导致 paper 侧日初净值不跨重启
+        持久——重启后 ``Account`` 回落默认 ``INIT_CAPITAL``，单日亏损检查的基线
+        被悄悄重置，当日已实现亏损被"洗白"。``Account.to_dict()`` 本就导出该
+        字段，此处只是不再丢掉它。
+        """
         state = {
             "nav": self.account.nav,
             "available_cash": self.account.available_cash,
+            "start_of_day_nav": self.account.start_of_day_nav,
             "positions": self.account.positions,
             "updated_at": datetime.now().isoformat(),
         }
@@ -398,6 +432,9 @@ class PaperExecutor(BaseExecutor):
             state = json.load(f)
         self.account.nav = state.get("nav", INIT_CAPITAL)
         self.account.available_cash = state.get("available_cash", INIT_CAPITAL)
+        # 与 save_state 对称读回日初净值；无该键（旧状态文件）时退化为当前 nav，
+        # 而非 INIT_CAPITAL——后者在账户已盈亏时会凭空造出一个错误基线。
+        self.account.start_of_day_nav = state.get("start_of_day_nav", self.account.nav)
         positions = state.get("positions", {})
         # 兼容旧状态文件:补齐 available_volume 字段
         for code, pos in positions.items():
