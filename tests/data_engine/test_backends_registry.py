@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 import importlib.util as ilu
+from contextlib import contextmanager
 
 import pytest
 
@@ -47,6 +48,57 @@ DEFAULT_FREE_CHAIN = ["local", "westock", "baostock", "akshare", "websearch"]
 # 按需调用组（注册可用，不进默认链）
 ON_DEMAND_BACKENDS = ["tushare", "gm", "xtquant", "tdxquant", "wind", "ifind"]
 
+# 主调度器 engine 模块的导入期快照。
+# 顶层 "engine" 槽位属于主调度器（engine.py / MasterEngine），任何测试都不得删除它：
+# 删除会强制后续测试重新 import 主调度器，触发 cvxpy 原生扩展重复加载的
+# access violation 段错误（OPEN-2026-0814-13）。此处仅在被误挤占时用于恢复。
+_saved_master_engine = sys.modules.get("engine")
+
+
+def _is_master_engine(mod) -> bool:
+    """判断给定模块是否为主调度器 engine（而非本文件加载的 data-engine engine）。"""
+    origin = getattr(mod, "__file__", None) or ""
+    return origin.endswith(os.path.join("jingni-trader", "engine.py")) or origin.endswith("engine.py")
+
+
+# 适配器上「会在构造期发起真实外部连接」的方法名。
+# 测试实例化这些适配器时必须屏蔽，否则环境一旦装了对应 SDK 且网络不可达，
+# 调用会长时间阻塞（pytest-timeout 的 thread 模式中断不了原生阻塞），
+# 导致整个测试套件超时卡死。
+_EXTERNAL_CONNECTION_METHODS = (
+    "_login",       # ifind_adapter：THS_iFinDLogin → 同花顺服务器
+    "_connect",     # wind_adapter：WindPy w.start() → Wind 终端
+    "_init_client",
+    "login",
+    "connect",
+)
+
+
+@contextmanager
+def _patch_external_connections(adapter_cls):
+    """屏蔽适配器类上所有会发起真实外部连接的方法。
+
+    仅 patch 该适配器类自身及其基类上真实存在的同名方法；不存在的方法跳过，
+    避免 MagicMock 凭空造出属性而掩盖真实缺陷（如方法被误改名/删除）。
+    """
+    patched = []
+    for name in _EXTERNAL_CONNECTION_METHODS:
+        # 在类自身或 MRO 基类上查找真实定义，找不到就不 patch
+        target = None
+        for klass in getattr(adapter_cls, "__mro__", (adapter_cls,)):
+            if name in vars(klass):
+                target = name
+                break
+        if target is None:
+            continue
+        patched.append((adapter_cls, target, getattr(adapter_cls, target)))
+        setattr(adapter_cls, target, lambda self, *a, _n=target, **kw: None)
+    try:
+        yield
+    finally:
+        for klass, name, original in patched:
+            setattr(klass, name, original)
+
 
 def _reset_scripts():
     for key in list(sys.modules.keys()):
@@ -69,8 +121,20 @@ def _load_engine_module():
     mod = ilu.module_from_spec(spec)
     sys.modules["data_engine_engine"] = mod
     spec.loader.exec_module(mod)
-    # 清理可能误入的顶层 engine 槽位，确保隔离
-    sys.modules.pop("engine", None)
+    # ⚠️ 不要 pop 顶层 "engine" 槽位。
+    # 原实现在此执行 sys.modules.pop("engine", None)，意图是"清掉可能误入的顶层 engine 槽位"。
+    # 但顶层 engine 槽位属于主调度器（MasterEngine），pop 会强制后续测试重新 import 主调度器，
+    # 而主调度器导入链含 cvxpy 等原生扩展，在 Windows 下重复导入会触发 access violation
+    # 段错误（OPEN-2026-0814-13），表现为全量跑崩溃、单跑该文件却全绿。
+    #
+    # 本函数加载的是独立模块名 "data_engine_engine"，本就不会占据 "engine" 槽位，
+    # 故该 pop 不仅无必要，而且是全量崩溃的直接诱因。改为：若加载过程中确实误入了
+    # 顶层 engine 槽位，则恢复为加载前的原值（而非删除），保证不破坏其他测试的模块状态。
+    _loaded_engine = sys.modules.get("engine")
+    if _loaded_engine is not None and _is_master_engine(_loaded_engine):
+        # 加载 data_engine_engine 时误把主调度器挤掉了 —— 恢复它
+        if _saved_master_engine is not None:
+            sys.modules["engine"] = _saved_master_engine
     return mod
 
 
@@ -170,8 +234,20 @@ class TestAdapterImportInstantiate:
         # 绝大部分适配器仅用标准库/已装包，可直接实例化验证 4 抽象方法；
         # wind/ifind 等 SDK 缺失时实例化会友好抛 DataSourceError —— 视为"已注册可用、缺前置条件"，
         # 用容错断言：要么成功实例化，要么抛 DataSourceError（不得抛 ImportError/TypeError/AttributeError）。
+        #
+        # ⚠️ 外部连接隔离（本用例此前导致全量套件 600s 超时卡死）：
+        # 部分适配器的 __init__ 会直接发起真实外部连接——
+        #   ifind_adapter.__init__ → self._login()  → THS_iFinDLogin（同花顺服务器）
+        #   wind_adapter.__init__  → self._connect() → WindPy w.start()（Wind 终端）
+        # 若环境里恰好装了对应 SDK 且网络不可达，该调用会长时间阻塞，且
+        # pytest-timeout 的 thread 模式无法中断原生阻塞，最终拖垮整个套件。
+        #
+        # 处置：用 mock 屏蔽这些「连接类」方法，只校验实例化逻辑本身（4 个抽象方法实现），
+        # 不校验真实登录——后者属集成层职责（由 requires_* 标记的用例承担）。
+        # 这不是 skip/xfail：用例仍完整执行，断言仍然生效。
         try:
-            cls(**(default_kwargs or {}))
+            with _patch_external_connections(cls):
+                cls(**(default_kwargs or {}))
         except Exception as e:  # noqa: BLE001
             assert "DataSourceError" in type(e).__name__, (
                 f"{backend} 实例化异常类型应为 DataSourceError（缺前置条件），实际 {type(e).__name__}: {e}"

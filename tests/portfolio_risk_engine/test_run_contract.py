@@ -13,6 +13,12 @@ from unittest import mock
 
 import pytest
 
+# 本文件触及 cvxpy/scipy 原生扩展，归入 heavy 批次以进程隔离运行，默认安全子集跳过，
+# 避免 Windows 原生栈同进程加载竞态段错误（OPEN-2026-0814-13）。
+pytestmark = [
+    pytest.mark.heavy,
+]
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 PORTFOLIO_ENGINE_DIR = os.path.join(ROOT, "skills", "portfolio-risk-engine")

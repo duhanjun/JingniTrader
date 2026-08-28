@@ -19,6 +19,12 @@ import pytest
 import pandas as pd
 import numpy as np
 
+# 本文件触及 talib 原生扩展，归入 heavy 批次以进程隔离运行，默认安全子集跳过，
+# 避免 Windows 原生栈同进程加载竞态段错误（OPEN-2026-0814-13）。
+pytestmark = [
+    pytest.mark.heavy,
+]
+
 from synthetic_data import make_synthetic_daily
 
 
