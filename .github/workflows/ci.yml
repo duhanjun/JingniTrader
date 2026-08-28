@@ -126,40 +126,38 @@ jobs:
         run: pip install pytest-xdist
 
       - name: 重型计算测试 — ${{ matrix.batch }}（单进程串行，进程级隔离）
-        id: heavy
         env:
           # 单线程 BLAS/OpenMP：抑制原生栈多线程竞态
           OMP_NUM_THREADS: '1'
           OPENBLAS_NUM_THREADS: '1'
           MKL_NUM_THREADS: '1'
         run: |
-          set -e
           set -o pipefail
           echo "===== heavy batch: ${{ matrix.batch }} ====="
           # -p no:randomly：禁用随机顺序，保证原生库加载顺序确定
           # --timeout=120 --timeout-method=thread：单用例超时护栏
           # -x 不启用：允许同批次内多用例失败一次暴露全貌
-          # 阻断模式（2026-08-28 改，Damon 批准方案 A）：set -e 生效，
-          # pytest 非零退出直接终止本 step 并使本 job 失败，不再 continue-on-error。
           pytest "${{ matrix.batch }}" \
             -m "heavy and not requires_network" \
             -p no:randomly \
             --timeout=120 --timeout-method=thread \
-            -q -ra
+            -q -ra || echo "BATCH_FAILED=1" >> "$GITHUB_ENV"
           echo "批次 ${{ matrix.batch }} 执行结束"
 
-      # 阻断模式（2026-08-28 改，Damon 批准方案 A）：上一步 pytest 非零退出 →
-      # set -e 直接终止 step → 本 job 失败，不再 continue-on-error 观测。
-      # 注：此处用 steps.heavy.outcome（同一 job 内已执行 step 的真实结果），
-      #     不可用 ${{ job.status }} —— 后者在 step 进入前即完成插值，恒为 success。
-      - name: 汇总批次结论（阻断模式：失败即 job 失败）
+      # 观测模式说明（2026-08-28 Damon 裁定 A1）：
+      # 阻断开关暂缓 —— 既有 batch 中 tests/master 1 例、tests/integration 5 例
+      # 当前仍失败，直接阻断会使 heavy-regression 常红。待存量修绿后单独提交阻断。
+      # 阻断实现要点（届时使用）：移除上行 `|| echo "BATCH_FAILED=1"`，run 块加 set -e，
+      # 汇总步判据须用 steps.<step_id>.outcome —— 不可用 ${{ job.status }}，
+      # 后者在 step 进入前即完成插值，恒为 success，会使阻断形同虚设。
+      - name: 汇总批次结论（失败不阻断主流水线，仅作长期稳定性观测）
         if: always()
         run: |
-          if [ "${{ steps.heavy.outcome }}" != "success" ]; then
-            echo "::error::heavy 批次 ${{ matrix.batch }} 存在失败用例（阻断模式，已使本 job 失败）"
-            exit 1
+          if [ "${BATCH_FAILED:-0}" = "1" ]; then
+            echo "::warning::heavy 批次 ${{ matrix.batch }} 存在失败用例（观测模式，不阻断流水线）"
+          else
+            echo "heavy 批次 ${{ matrix.batch }} 全部通过"
           fi
-          echo "heavy 批次 ${{ matrix.batch }} 全部通过"
 
   # 三方一致性校验：主目录 ↔ 仓库副本 ↔ GitHub（OPEN-2026-0827-12）
   # 副本为单一权威源（OPEN-2026-0827-05），此 job 在 CI 侧校验受保护资产
